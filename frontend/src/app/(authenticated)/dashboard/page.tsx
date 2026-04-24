@@ -9,6 +9,7 @@ import {
   useMerchantApiKey,
 } from "@/lib/merchant-store";
 import FirstApiKeyModal from "@/components/FirstApiKeyModal";
+import FirstPaymentCelebration from "@/components/FirstPaymentCelebration";
 import PaymentMetrics from "@/components/PaymentMetrics";
 import RecentPayments from "@/components/RecentPayments";
 
@@ -168,6 +169,7 @@ export default function DashboardPage() {
         isOpen={isFirstKeyModalOpen}
         onClose={() => setIsFirstKeyModalOpen(false)}
       />
+      <FirstPaymentCelebration />
     </div>
   );
 }
