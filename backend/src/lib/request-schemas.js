@@ -5,6 +5,8 @@ import {
   isValidStellarAccountId,
   validateMemo,
 } from "./stellar.js";
+import { resolveAssetIssuer } from "../constants/assetConstants.js";
+ 
 
 const VALID_MEMO_TYPES = ["text", "id", "hash", "return"];
 export const MINIMUM_XLM_PAYMENT_AMOUNT = 0.01;
@@ -99,11 +101,25 @@ function applyPaymentValidationRules(body, ctx) {
     });
   }
 
-  if (body.asset !== "XLM" && !body.asset_issuer) {
+  const resolvedAssetIssuer = resolveAssetIssuer(body.asset, body.asset_issuer);
+
+  if (body.asset !== "XLM" && !resolvedAssetIssuer) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["asset_issuer"],
       message: "asset_issuer is required for non-native assets",
+    });
+  }
+
+  if (
+    body.asset !== "XLM" &&
+    resolvedAssetIssuer &&
+    !isValidStellarPublicKey(resolvedAssetIssuer)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["asset_issuer"],
+      message: "asset_issuer must be a valid Stellar public key",
     });
   }
 
@@ -144,9 +160,18 @@ function applyPaymentValidationRules(body, ctx) {
   }
 }
 
+function applyResolvedAssetIssuer(body) {
+  const resolvedAssetIssuer = resolveAssetIssuer(body.asset, body.asset_issuer);
+
+  return {
+    ...body,
+    asset_issuer: resolvedAssetIssuer || undefined,
+  };
+}
+
 export const paymentZodSchema = paymentBaseSchema.superRefine(
   applyPaymentValidationRules,
-);
+).transform(applyResolvedAssetIssuer);
 
 export const registerMerchantZodSchema = z.object({
   email: z
@@ -221,7 +246,8 @@ export const paymentSessionZodSchema = paymentBaseSchema
   .extend({
     branding_overrides: sessionBrandingSchema,
   })
-  .superRefine(applyPaymentValidationRules);
+  .superRefine(applyPaymentValidationRules)
+  .transform(applyResolvedAssetIssuer);
 
 export const v2PaymentSessionSchema = paymentSessionZodSchema;
 

@@ -12,6 +12,8 @@ const HORIZON_URL = (
 const server = new StellarSdk.Horizon.Server(HORIZON_URL);
 const HORIZON_HEALTH_TIMEOUT_MS = 2_000;
 const HORIZON_RETRY_DELAYS_MS = [150, 500];
+const STELLAR_PUBLIC_KEY_PATTERN = /^G[A-Z2-7]{55}$/;
+const ASSET_CODE_PATTERN = /^[A-Z0-9]{1,12}$/;
 
 function parseStroops(value) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -215,7 +217,9 @@ export async function isHorizonReachable() {
 }
 
 export function resolveAsset(assetCode, assetIssuer) {
-  if (!assetCode) {
+  const normalizedAssetCode = String(assetCode || "").trim().toUpperCase();
+
+  if (!normalizedAssetCode) {
     throw new Error("Asset code is required");
   }
 
@@ -225,6 +229,11 @@ export function resolveAsset(assetCode, assetIssuer) {
   }
 
   if (normalizedCode === "XLM") {
+  if (!ASSET_CODE_PATTERN.test(normalizedAssetCode)) {
+    throw new Error("Asset code must be 1-12 alphanumeric characters");
+  }
+
+  if (normalizedAssetCode === "XLM") {
     return StellarSdk.Asset.native();
   }
 
@@ -237,6 +246,36 @@ export function resolveAsset(assetCode, assetIssuer) {
   }
 
   return new StellarSdk.Asset(normalizedCode, assetIssuer);
+  const normalizedAssetIssuer = String(assetIssuer).trim();
+
+  if (!isValidStellarPublicKey(normalizedAssetIssuer)) {
+    throw new Error("Asset issuer must be a valid Stellar public key");
+  }
+
+  return new StellarSdk.Asset(normalizedAssetCode, normalizedAssetIssuer);
+}
+
+export function isValidStellarPublicKey(value) {
+  const publicKey = String(value || "").trim();
+
+  if (!STELLAR_PUBLIC_KEY_PATTERN.test(publicKey)) {
+    return false;
+  }
+
+  if (typeof StellarSdk.StrKey?.isValidEd25519PublicKey === "function") {
+    return StellarSdk.StrKey.isValidEd25519PublicKey(publicKey);
+  }
+
+  if (typeof StellarSdk.Keypair?.fromPublicKey === "function") {
+    try {
+      StellarSdk.Keypair.fromPublicKey(publicKey);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function amountsMatch(expected, received) {
