@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import Image from "next/image";
 import { useParams, useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
@@ -23,7 +23,6 @@ import Skeleton, { SkeletonTheme } from "react-loading-skeleton";
 import "react-loading-skeleton/dist/skeleton.css";
 import { QRCodeSVG } from "qrcode.react";
 import { localeToLanguageTag } from "@/i18n/config";
-import { motion, AnimatePresence } from "framer-motion";
 import { PaymentSuccessAnimation } from "@/components/PaymentSuccessAnimation";
 import { useCheckoutPresence } from "@/lib/useCheckoutPresence";
 import { Modal } from "@/components/ui/Modal";
@@ -390,18 +389,14 @@ export default function PaymentPage() {
 
   return (
     <>
-      <AnimatePresence>
-        {isOptimisticSuccess && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-white/60 backdrop-blur-md"
-          >
-            <PaymentSuccessAnimation />
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <PaymentSuccessAnimation
+        show={isOptimisticSuccess}
+        onComplete={() => setIsOptimisticSuccess(false)}
+        amount={payment?.amount != null ? String(payment.amount) : undefined}
+        asset={payment?.asset}
+        txId={payment?.tx_id ?? undefined}
+        isOptimistic={payment?.status !== "confirmed" && payment?.status !== "completed"}
+      />
 
       <AnimatePresence>
         {isProcessing && !isOptimisticSuccess && (
@@ -714,3 +709,5 @@ export default function PaymentPage() {
     </>
   );
 }
+
+
