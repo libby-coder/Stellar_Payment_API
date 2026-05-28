@@ -6,6 +6,33 @@ import { ThemeProvider as NextThemesProvider } from "next-themes";
 export type ThemeMode = "light" | "dark" | "system";
 export type ResolvedTheme = "light" | "dark";
 
+/** Returns whether the OS currently prefers a dark color scheme. */
+function systemPrefersDark(): boolean {
+  return (
+    typeof globalThis !== "undefined" &&
+    !!globalThis.window &&
+    globalThis.window.matchMedia("(prefers-color-scheme: dark)").matches
+  );
+}
+
+/** Resolves a {@link ThemeMode} to a concrete light/dark theme. */
+export function resolveTheme(mode: ThemeMode, forced?: ResolvedTheme): ResolvedTheme {
+  if (forced) return forced;
+  if (mode === "system") return systemPrefersDark() ? "dark" : "light";
+  return mode;
+}
+
+/** Applies the resolved theme to the document root class and meta theme-color. */
+function applyThemeToDocument(resolved: ResolvedTheme): void {
+  if (typeof globalThis === "undefined" || !globalThis.document) return;
+  globalThis.document.documentElement.classList.remove("light", "dark");
+  globalThis.document.documentElement.classList.add(resolved);
+  const metaThemeColor = globalThis.document.querySelector('meta[name="theme-color"]');
+  if (metaThemeColor) {
+    metaThemeColor.setAttribute("content", resolved === "dark" ? "#0A0A0A" : "#FFFFFF");
+  }
+}
+
 interface ThemeContextType {
   theme: ThemeMode | undefined;
   resolvedTheme: ResolvedTheme | undefined;
@@ -50,25 +77,15 @@ export function ThemeProvider({
 
     try {
       setThemeState(newTheme);
-      
+
       if (typeof globalThis !== "undefined" && globalThis.window) {
         globalThis.localStorage.setItem(storageKey, newTheme);
-        
-        const mediaQuery = globalThis.window.matchMedia("(prefers-color-scheme: dark)");
-        const systemTheme = mediaQuery.matches ? "dark" : "light";
-        const resolved = newTheme === "system" ? systemTheme : newTheme;
-        
+
+        const resolved = resolveTheme(newTheme);
         setResolvedTheme(resolved);
-        
-        globalThis.document.documentElement.classList.remove("light", "dark");
-        globalThis.document.documentElement.classList.add(resolved);
-        
-        const metaThemeColor = globalThis.document.querySelector('meta[name="theme-color"]');
-        if (metaThemeColor) {
-          metaThemeColor.setAttribute("content", resolved === "dark" ? "#0A0A0A" : "#FFFFFF");
-        }
+        applyThemeToDocument(resolved);
       }
-      
+
       setError(null);
     } catch (err) {
       // Revert optimistic update — restore the previous theme, the document
@@ -78,6 +95,7 @@ export function ThemeProvider({
       if (previousResolved) {
         setResolvedTheme(previousResolved);
         if (typeof globalThis !== "undefined" && globalThis.window) {
+          applyThemeToDocument(previousResolved);
           globalThis.document.documentElement.classList.remove("light", "dark");
           globalThis.document.documentElement.classList.add(previousResolved);
 
@@ -113,18 +131,10 @@ export function ThemeProvider({
     
     const updateResolvedTheme = () => {
       try {
-        const mediaQuery = globalThis.window.matchMedia("(prefers-color-scheme: dark)");
-        const systemTheme = mediaQuery.matches ? "dark" : "light";
-        const resolved = forcedTheme || (initialTheme === "system" ? systemTheme : initialTheme);
-        
+        const resolved = resolveTheme(initialTheme, forcedTheme);
+
         setResolvedTheme(resolved);
-        globalThis.document.documentElement.classList.remove("light", "dark");
-        globalThis.document.documentElement.classList.add(resolved);
-        
-        const metaThemeColor = globalThis.document.querySelector('meta[name="theme-color"]');
-        if (metaThemeColor) {
-          metaThemeColor.setAttribute("content", resolved === "dark" ? "#0A0A0A" : "#FFFFFF");
-        }
+        applyThemeToDocument(resolved);
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "Failed to initialize theme";
         setError(errorMessage);

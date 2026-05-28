@@ -84,9 +84,12 @@ export default function ThemeToggle() {
         {announcement}
       </div>
 
-      <button
+      <motion.button
         onClick={handleThemeToggle}
-        className={`flex h-9 w-9 items-center justify-center rounded-lg border transition-all active:scale-95 ${
+        whileHover={{ scale: 1.05 }}
+        whileTap={{ scale: 0.95 }}
+        transition={{ type: "spring", stiffness: 400, damping: 17 }}
+        className={`flex h-9 w-9 items-center justify-center rounded-lg border transition-colors ${
           error
             ? "border-red-500/50 bg-red-500/10 hover:bg-red-500/20"
             : "border-white/10 bg-white/5 hover:bg-white/10"
@@ -188,6 +191,7 @@ export default function ThemeToggle() {
           </motion.div>
         )}
       </AnimatePresence>
+      </motion.button>
 
       {/* Hidden description for screen readers */}
       <div id="theme-description" className="sr-only">
