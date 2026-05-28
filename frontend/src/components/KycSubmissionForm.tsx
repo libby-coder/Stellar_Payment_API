@@ -1,537 +1,606 @@
 "use client";
 
-import React, { useState, useCallback } from "react";
+import React, { useReducer, useCallback, useState, useId } from "react";
 import { motion, AnimatePresence, type Variants } from "framer-motion";
 import { useTranslations } from "next-intl";
-import { useOptimisticUpdate } from "@/hooks/useOptimisticUpdate";
+import { toast } from "sonner";
+import {
+  kycFlowReducer,
+  initialKycFlowState,
+  type KycStep,
+} from "@/lib/kyc-flow";
 
-/**
- * Form data interface for KYC submission
- */
-interface KYCFormData {
-  fullName: string;
-  email: string;
-  dateOfBirth: string;
-  address: string;
-  idType: string;
-  idNumber: string;
-  documentUpload: File | null;
-}
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-/**
- * Props for KYCSubmissionForm component
- */
-interface KYCSubmissionFormProps {
-  onSubmit?: (data: KYCFormData) => Promise<void>;
-  onCancel?: () => void;
-}
+const STEPS: KycStep[] = ["personal", "address", "documents", "review"];
+const TOTAL_STEPS = STEPS.length;
 
-/**
- * Animation variants for form container
- */
-const containerVariants: Variants = {
-  hidden: { opacity: 0, y: 20 },
-  visible: {
-    opacity: 1,
-    y: 0,
-    transition: {
-      duration: 0.4,
-      ease: [0.16, 1, 0.3, 1],
-      staggerChildren: 0.1,
-    },
-  },
-  exit: {
+// ─── Animation variants ───────────────────────────────────────────────────────
+
+const stepVariants: Variants = {
+  enter: (dir: number) => ({
+    x: dir > 0 ? 48 : -48,
     opacity: 0,
-    y: -20,
-    transition: { duration: 0.3 },
-  },
-};
-
-/**
- * Animation variants for form fields
- */
-const fieldVariants: Variants = {
-  hidden: { opacity: 0, x: -20 },
-  visible: {
-    opacity: 1,
+  }),
+  center: {
     x: 0,
+    opacity: 1,
     transition: { duration: 0.3, ease: [0.16, 1, 0.3, 1] },
   },
+  exit: (dir: number) => ({
+    x: dir > 0 ? -48 : 48,
+    opacity: 0,
+    transition: { duration: 0.2, ease: [0.16, 1, 0.3, 1] },
+  }),
 };
 
-/**
- * Animation variants for submit button
- */
-const submitVariants: Variants = {
-  idle: { scale: 1 },
-  loading: {
-    scale: [1, 0.95, 1],
-    transition: {
-      duration: 1.5,
-      repeat: Infinity,
-      ease: "easeInOut",
-    },
-  },
-  success: {
-    scale: [1, 1.05, 1],
-    transition: { duration: 0.5 },
-  },
+const fadeUp: Variants = {
+  hidden: { opacity: 0, y: 16 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.4 } },
 };
 
-/**
- * KYCSubmissionForm Component
- *
- * Form for Know Your Customer verification with framer-motion animations
- * and comprehensive screen reader support.
- */
-export const KYCSubmissionForm: React.FC<KYCSubmissionFormProps> = ({
-  onSubmit,
-  onCancel,
-}) => {
-  const t = useTranslations();
-  const [formData, setFormData] = useState<KYCFormData>({
-    fullName: "",
-    email: "",
-    dateOfBirth: "",
-    address: "",
-    idType: "",
-    idNumber: "",
-    documentUpload: null,
-  });
-  const [errors, setErrors] = useState<Partial<KYCFormData>>({});
-  const [announcementText, setAnnouncementText] = useState("");
+// ─── Field wrapper ────────────────────────────────────────────────────────────
 
-  const {
-    state: kycState,
-    isPending,
-    executeUpdate,
-  } = useOptimisticUpdate<{ submitted: boolean; data: KYCFormData | null }>(
-    { submitted: false, data: null },
-    {
-      onSuccess: () => {
-        setAnnouncementText(t("kyc.submitSuccess") || "KYC form submitted successfully!");
-      },
-      onError: () => {
-        setAnnouncementText(t("kyc.submitError") || "Failed to submit KYC form. Please try again.");
-      },
-    }
+function Field({
+  id,
+  label,
+  error,
+  children,
+}: {
+  id: string;
+  label: string;
+  error?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label htmlFor={id} className="text-sm font-medium text-pluto-900">
+        {label}
+      </label>
+      {children}
+      <AnimatePresence>
+        {error && (
+          <motion.p
+            id={`${id}-error`}
+            role="alert"
+            className="text-xs text-red-600"
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+          >
+            {error}
+          </motion.p>
+        )}
+      </AnimatePresence>
+    </div>
   );
+}
 
-  /**
-   * Validate form data
-   */
-  const validateForm = useCallback((): boolean => {
-    const newErrors: Partial<KYCFormData> = {};
+// ─── Main component ───────────────────────────────────────────────────────────
 
-    if (!formData.fullName.trim()) {
-      newErrors.fullName = "Full name is required";
-    }
-    if (!formData.email.trim()) {
-      newErrors.email = "Email is required";
-    } else if (!/\S+@\S+\.\S+/.test(formData.email)) {
-      newErrors.email = "Email is invalid";
-    }
-    if (!formData.dateOfBirth) {
-      newErrors.dateOfBirth = "Date of birth is required";
-    }
-    if (!formData.address.trim()) {
-      newErrors.address = "Address is required";
-    }
-    if (!formData.idType) {
-      newErrors.idType = "ID type is required";
-    }
-    if (!formData.idNumber.trim()) {
-      newErrors.idNumber = "ID number is required";
-    }
-    if (!formData.documentUpload) {
-      newErrors.documentUpload = "Document upload is required";
+function KycSubmissionForm() {
+  const t = useTranslations();
+  const uid = useId();
+  const [state, dispatch] = useReducer(kycFlowReducer, initialKycFlowState);
+  const [direction, setDirection] = useState(1);
+  const [announcement, setAnnouncement] = useState("");
+  const [stepErrors, setStepErrors] = useState<Record<string, string>>({});
+
+  const stepIndex = STEPS.indexOf(state.currentStep);
+
+  // ── Step-level validation ─────────────────────────────────────────────────
+
+  const validateCurrentStep = useCallback((): boolean => {
+    const errs: Record<string, string> = {};
+
+    if (state.currentStep === "personal") {
+      if (!state.personal.firstName.trim()) errs.firstName = t("required") || "Required";
+      if (!state.personal.lastName.trim()) errs.lastName = t("required") || "Required";
     }
 
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
-  }, [formData]);
+    setStepErrors(errs);
+    return Object.keys(errs).length === 0;
+  }, [state.currentStep, state.personal, t]);
 
-  /**
-   * Handle form submission
-   */
-  const handleSubmit = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
+  // ── Navigation ────────────────────────────────────────────────────────────
 
-    if (!validateForm()) {
-      setAnnouncementText(t("kyc.validationError") || "Please fix the errors in the form");
+  const goNext = useCallback(() => {
+    if (!validateCurrentStep()) {
+      setAnnouncement(t("validationError") || "Please fill required fields");
       return;
     }
-
-    setAnnouncementText(t("kyc.submitting") || "Submitting KYC form...");
-
-    await executeUpdate(
-      () => ({ submitted: true, data: formData }),
-      async () => { await onSubmit?.(formData); }
-    );
-  }, [formData, validateForm, onSubmit, t, executeUpdate]);
-
-  /**
-   * Handle input changes
-   */
-  const handleInputChange = useCallback((field: keyof KYCFormData, value: string | File | null) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
-    // Clear error when user starts typing
-    if (errors[field]) {
-      setErrors(prev => ({ ...prev, [field]: undefined }));
+    if (stepIndex < TOTAL_STEPS - 1) {
+      setDirection(1);
+      dispatch({ type: "SET_STEP", step: STEPS[stepIndex + 1]! });
+      setStepErrors({});
+      setAnnouncement(
+        `${t("step") || "Step"} ${stepIndex + 2} ${t("of") || "of"} ${TOTAL_STEPS}`,
+      );
     }
-  }, [errors]);
+  }, [validateCurrentStep, stepIndex, t]);
 
-  /**
-   * Handle file upload
-   */
-  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0] || null;
-    handleInputChange("documentUpload", file);
-  }, [handleInputChange]);
+  const goBack = useCallback(() => {
+    if (stepIndex > 0) {
+      setDirection(-1);
+      dispatch({ type: "SET_STEP", step: STEPS[stepIndex - 1]! });
+      setStepErrors({});
+    }
+  }, [stepIndex]);
+
+  // ── Submission ────────────────────────────────────────────────────────────
+
+  const handleSubmit = useCallback(async () => {
+    dispatch({ type: "SUBMIT" });
+    setAnnouncement(t("submitting") || "Submitting...");
+
+    try {
+      const res = await fetch("/api/kyc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          personal: state.personal,
+          address: state.address,
+          documents: {
+            idType: state.documents.idType,
+            idNumber: state.documents.idNumber,
+          },
+        }),
+      });
+
+      if (!res.ok) throw new Error(t("submitError") || "Submission failed");
+
+      dispatch({ type: "SUBMIT_SUCCESS", submittedAt: new Date().toISOString() });
+      setAnnouncement(t("successTitle") || "KYC submitted successfully!");
+      toast.success(t("successTitle") || "KYC submitted successfully!");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      dispatch({ type: "SUBMIT_FAILURE", error: msg });
+      setAnnouncement(msg);
+      toast.error(msg);
+    }
+  }, [state, t]);
+
+  // ── Success screen ────────────────────────────────────────────────────────
+
+  if (state.submittedAt) {
+    return (
+      <div
+        className="w-full max-w-2xl mx-auto"
+        role="region"
+        aria-label={t("kycForm") || "KYC Submission Form"}
+      >
+        <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+          {announcement}
+        </div>
+        <motion.div
+          className="flex flex-col items-center gap-6 rounded-3xl border border-pluto-100 bg-white p-10 shadow-lg text-center"
+          variants={fadeUp}
+          initial="hidden"
+          animate="visible"
+        >
+          <motion.div
+            className="flex h-16 w-16 items-center justify-center rounded-full bg-green-100"
+            initial={{ scale: 0 }}
+            animate={{ scale: 1 }}
+            transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
+          >
+            <svg
+              className="h-8 w-8 text-green-600"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+          </motion.div>
+
+          <h2 className="text-2xl font-bold text-pluto-900" aria-live="assertive">
+            {t("successTitle")}
+          </h2>
+          <p className="text-pluto-600">
+            {t("successDescription") || "Your KYC verification has been submitted and is under review."}
+          </p>
+
+          <button
+            type="button"
+            onClick={() => dispatch({ type: "RESET" })}
+            className="rounded-xl bg-pluto-600 px-8 py-3 font-semibold text-white hover:bg-pluto-700 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+          >
+            {t("submitAnother")}
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ── Multi-step form ───────────────────────────────────────────────────────
 
   return (
     <div
       className="w-full max-w-2xl mx-auto"
       role="region"
-      aria-label={t("kyc.formTitle") || "KYC Submission Form"}
+      aria-label={t("kycForm") || "KYC Submission Form"}
     >
-      {/* Screen reader announcements */}
-      <div
-        className="sr-only"
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      >
-        {announcementText}
+      {/* Screen reader live region */}
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {announcement}
       </div>
 
-      <motion.form
-        onSubmit={handleSubmit}
-        className="space-y-6 rounded-3xl border border-pluto-100 bg-white p-8 shadow-lg"
-        variants={containerVariants}
-        initial="hidden"
-        animate="visible"
-        exit="exit"
-      >
-        {/* Form header */}
-        <motion.div variants={fieldVariants} className="text-center">
-          <h2 className="text-2xl font-bold text-pluto-900 mb-2">
-            {t("kyc.formTitle") || "KYC Verification"}
-          </h2>
-          <p className="text-pluto-600">
-            {t("kyc.formDescription") || "Please provide your information for identity verification"}
-          </p>
-        </motion.div>
-
-        {/* Full Name */}
-        <motion.div variants={fieldVariants}>
-          <label
-            htmlFor="fullName"
-            className="block text-sm font-medium text-pluto-900 mb-2"
-          >
-            {t("kyc.fullName") || "Full Name"} *
-          </label>
-          <input
-            id="fullName"
-            type="text"
-            value={formData.fullName}
-            onChange={(e) => handleInputChange("fullName", e.target.value)}
-            className={`w-full rounded-xl border px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400 transition-all ${
-              errors.fullName ? "border-red-500" : "border-pluto-200"
-            }`}
-            aria-describedby={errors.fullName ? "fullName-error" : undefined}
-            aria-invalid={!!errors.fullName}
-            required
-          />
-          <AnimatePresence>
-            {errors.fullName && (
-              <motion.p
-                id="fullName-error"
-                className="mt-1 text-sm text-red-600"
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                role="alert"
-              >
-                {errors.fullName}
-              </motion.p>
-            )}
-          </AnimatePresence>
-        </motion.div>
-
-        {/* Email */}
-        <motion.div variants={fieldVariants}>
-          <label
-            htmlFor="email"
-            className="block text-sm font-medium text-pluto-900 mb-2"
-          >
-            {t("kyc.email") || "Email Address"} *
-          </label>
-          <input
-            id="email"
-            type="email"
-            value={formData.email}
-            onChange={(e) => handleInputChange("email", e.target.value)}
-            className={`w-full rounded-xl border px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400 transition-all ${
-              errors.email ? "border-red-500" : "border-pluto-200"
-            }`}
-            aria-describedby={errors.email ? "email-error" : undefined}
-            aria-invalid={!!errors.email}
-            required
-          />
-          <AnimatePresence>
-            {errors.email && (
-              <motion.p
-                id="email-error"
-                className="mt-1 text-sm text-red-600"
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                role="alert"
-              >
-                {errors.email}
-              </motion.p>
-            )}
-          </AnimatePresence>
-        </motion.div>
-
-        {/* Date of Birth */}
-        <motion.div variants={fieldVariants}>
-          <label
-            htmlFor="dateOfBirth"
-            className="block text-sm font-medium text-pluto-900 mb-2"
-          >
-            {t("kyc.dateOfBirth") || "Date of Birth"} *
-          </label>
-          <input
-            id="dateOfBirth"
-            type="date"
-            value={formData.dateOfBirth}
-            onChange={(e) => handleInputChange("dateOfBirth", e.target.value)}
-            className={`w-full rounded-xl border px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400 transition-all ${
-              errors.dateOfBirth ? "border-red-500" : "border-pluto-200"
-            }`}
-            aria-describedby={errors.dateOfBirth ? "dateOfBirth-error" : undefined}
-            aria-invalid={!!errors.dateOfBirth}
-            required
-          />
-          <AnimatePresence>
-            {errors.dateOfBirth && (
-              <motion.p
-                id="dateOfBirth-error"
-                className="mt-1 text-sm text-red-600"
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                role="alert"
-              >
-                {errors.dateOfBirth}
-              </motion.p>
-            )}
-          </AnimatePresence>
-        </motion.div>
-
-        {/* Address */}
-        <motion.div variants={fieldVariants}>
-          <label
-            htmlFor="address"
-            className="block text-sm font-medium text-pluto-900 mb-2"
-          >
-            {t("kyc.address") || "Residential Address"} *
-          </label>
-          <textarea
-            id="address"
-            value={formData.address}
-            onChange={(e) => handleInputChange("address", e.target.value)}
-            rows={3}
-            className={`w-full rounded-xl border px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400 transition-all ${
-              errors.address ? "border-red-500" : "border-pluto-200"
-            }`}
-            aria-describedby={errors.address ? "address-error" : undefined}
-            aria-invalid={!!errors.address}
-            required
-          />
-          <AnimatePresence>
-            {errors.address && (
-              <motion.p
-                id="address-error"
-                className="mt-1 text-sm text-red-600"
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                role="alert"
-              >
-                {errors.address}
-              </motion.p>
-            )}
-          </AnimatePresence>
-        </motion.div>
-
-        {/* ID Type */}
-        <motion.div variants={fieldVariants}>
-          <label
-            htmlFor="idType"
-            className="block text-sm font-medium text-pluto-900 mb-2"
-          >
-            {t("kyc.idType") || "ID Type"} *
-          </label>
-          <select
-            id="idType"
-            value={formData.idType}
-            onChange={(e) => handleInputChange("idType", e.target.value)}
-            className={`w-full rounded-xl border px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400 transition-all ${
-              errors.idType ? "border-red-500" : "border-pluto-200"
-            }`}
-            aria-describedby={errors.idType ? "idType-error" : undefined}
-            aria-invalid={!!errors.idType}
-            required
-          >
-            <option value="">{t("kyc.selectIdType") || "Select ID type"}</option>
-            <option value="passport">{t("kyc.passport") || "Passport"}</option>
-            <option value="drivers-license">{t("kyc.driversLicense") || "Driver's License"}</option>
-            <option value="national-id">{t("kyc.nationalId") || "National ID"}</option>
-          </select>
-          <AnimatePresence>
-            {errors.idType && (
-              <motion.p
-                id="idType-error"
-                className="mt-1 text-sm text-red-600"
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                role="alert"
-              >
-                {errors.idType}
-              </motion.p>
-            )}
-          </AnimatePresence>
-        </motion.div>
-
-        {/* ID Number */}
-        <motion.div variants={fieldVariants}>
-          <label
-            htmlFor="idNumber"
-            className="block text-sm font-medium text-pluto-900 mb-2"
-          >
-            {t("kyc.idNumber") || "ID Number"} *
-          </label>
-          <input
-            id="idNumber"
-            type="text"
-            value={formData.idNumber}
-            onChange={(e) => handleInputChange("idNumber", e.target.value)}
-            className={`w-full rounded-xl border px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400 transition-all ${
-              errors.idNumber ? "border-red-500" : "border-pluto-200"
-            }`}
-            aria-describedby={errors.idNumber ? "idNumber-error" : undefined}
-            aria-invalid={!!errors.idNumber}
-            required
-          />
-          <AnimatePresence>
-            {errors.idNumber && (
-              <motion.p
-                id="idNumber-error"
-                className="mt-1 text-sm text-red-600"
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                role="alert"
-              >
-                {errors.idNumber}
-              </motion.p>
-            )}
-          </AnimatePresence>
-        </motion.div>
-
-        {/* Document Upload */}
-        <motion.div variants={fieldVariants}>
-          <label
-            htmlFor="documentUpload"
-            className="block text-sm font-medium text-pluto-900 mb-2"
-          >
-            {t("kyc.documentUpload") || "Upload ID Document"} *
-          </label>
-          <div className="relative">
-            <input
-              id="documentUpload"
-              type="file"
-              accept="image/*,.pdf"
-              onChange={handleFileChange}
-              className={`w-full rounded-xl border px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400 transition-all file:mr-4 file:rounded-lg file:border-0 file:bg-pluto-100 file:px-4 file:py-2 file:text-sm file:font-medium file:text-pluto-900 hover:file:bg-pluto-200 ${
-                errors.documentUpload ? "border-red-500" : "border-pluto-200"
-              }`}
-              aria-describedby={errors.documentUpload ? "documentUpload-error" : "documentUpload-help"}
-              aria-invalid={!!errors.documentUpload}
-              required
-            />
-            <p id="documentUpload-help" className="mt-1 text-xs text-pluto-600">
-              {t("kyc.documentHelp") || "Accepted formats: JPG, PNG, PDF. Max size: 5MB"}
-            </p>
-          </div>
-          <AnimatePresence>
-            {errors.documentUpload && (
-              <motion.p
-                id="documentUpload-error"
-                className="mt-1 text-sm text-red-600"
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                role="alert"
-              >
-                {errors.documentUpload}
-              </motion.p>
-            )}
-          </AnimatePresence>
-        </motion.div>
-
-        {/* Form actions */}
-        <motion.div
-          variants={fieldVariants}
-          className="flex gap-4 pt-4"
+      <div className="rounded-3xl border border-pluto-100 bg-white p-8 shadow-lg space-y-6">
+        {/* ── Progress indicator ── */}
+        <div
+          role="progressbar"
+          aria-valuenow={stepIndex + 1}
+          aria-valuemin={1}
+          aria-valuemax={TOTAL_STEPS}
+          aria-label={`${t("step") || "Step"} ${stepIndex + 1} ${t("of") || "of"} ${TOTAL_STEPS}`}
+          className="space-y-2"
         >
-          <motion.button
-            type="button"
-            onClick={onCancel}
-            className="flex-1 rounded-xl border border-pluto-200 bg-white px-6 py-3 font-semibold text-pluto-900 transition-all hover:bg-pluto-50 focus:ring-2 focus:ring-pluto-400"
-            variants={submitVariants}
-            animate="idle"
-            disabled={isPending}
+          <div className="flex justify-between text-xs text-pluto-600">
+            <span>{stepIndex + 1} of {TOTAL_STEPS}</span>
+          </div>
+          <div className="flex gap-2" role="list" aria-label={t("steps") || "Steps"}>
+            {STEPS.map((s, i) => (
+              <div
+                key={s}
+                role="listitem"
+                aria-current={i === stepIndex ? "step" : undefined}
+                className={`h-2 flex-1 rounded-full transition-colors duration-300 ${
+                  i <= stepIndex ? "bg-pluto-600" : "bg-pluto-100"
+                }`}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* ── Animated step content ── */}
+        <AnimatePresence mode="wait" custom={direction}>
+          <motion.div
+            key={state.currentStep}
+            custom={direction}
+            variants={stepVariants}
+            initial="enter"
+            animate="center"
+            exit="exit"
+            className="space-y-4"
           >
-            {t("common.cancel") || "Cancel"}
-          </motion.button>
-          <motion.button
-            type="submit"
-            className="flex-1 rounded-xl bg-pluto-600 px-6 py-3 font-semibold text-white transition-all hover:bg-pluto-700 focus:ring-2 focus:ring-pluto-400 disabled:opacity-50 disabled:cursor-not-allowed"
-            variants={submitVariants}
-            animate={kycState.submitted ? (isPending ? "loading" : "success") : "idle"}
-            disabled={isPending || kycState.submitted}
-            aria-describedby="submit-status"
-          >
-            {isPending && kycState.submitted ? (
-              <span className="flex items-center justify-center gap-2">
-                <motion.div
-                  className="h-4 w-4 rounded-full border-2 border-white border-t-transparent"
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-                />
-                {t("kyc.confirming") || "Confirming..."}
-              </span>
-            ) : kycState.submitted ? (
-              t("kyc.submitted") || "Submitted!"
-            ) : (
-              t("kyc.submit") || "Submit KYC"
+            {/* Step 1: Personal Info */}
+            {state.currentStep === "personal" && (
+              <section aria-labelledby={`${uid}-personal-title`} className="space-y-4">
+                <h2 id={`${uid}-personal-title`} className="text-xl font-bold text-pluto-900">
+                  {t("personalInfo")}
+                </h2>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <Field
+                    id={`${uid}-firstName`}
+                    label={t("firstName") || "First Name"}
+                    error={stepErrors.firstName}
+                  >
+                    <input
+                      id={`${uid}-firstName`}
+                      type="text"
+                      placeholder={t("firstName")}
+                      value={state.personal.firstName}
+                      onChange={(e) =>
+                        dispatch({ type: "UPDATE_PERSONAL", data: { firstName: e.target.value } })
+                      }
+                      aria-required="true"
+                      aria-invalid={!!stepErrors.firstName}
+                      aria-describedby={stepErrors.firstName ? `${uid}-firstName-error` : undefined}
+                      className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                    />
+                  </Field>
+
+                  <Field
+                    id={`${uid}-lastName`}
+                    label={t("lastName") || "Last Name"}
+                    error={stepErrors.lastName}
+                  >
+                    <input
+                      id={`${uid}-lastName`}
+                      type="text"
+                      placeholder={t("lastName")}
+                      value={state.personal.lastName}
+                      onChange={(e) =>
+                        dispatch({ type: "UPDATE_PERSONAL", data: { lastName: e.target.value } })
+                      }
+                      aria-required="true"
+                      aria-invalid={!!stepErrors.lastName}
+                      aria-describedby={stepErrors.lastName ? `${uid}-lastName-error` : undefined}
+                      className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                    />
+                  </Field>
+                </div>
+
+                <Field id={`${uid}-email`} label={t("email") || "Email"}>
+                  <input
+                    id={`${uid}-email`}
+                    type="email"
+                    placeholder={t("email")}
+                    value={state.personal.nationality}
+                    onChange={(e) =>
+                      dispatch({ type: "UPDATE_PERSONAL", data: { nationality: e.target.value } })
+                    }
+                    className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                  />
+                </Field>
+
+                <Field id={`${uid}-dateOfBirth`} label={t("dateOfBirth") || "Date of Birth"}>
+                  <input
+                    id={`${uid}-dateOfBirth`}
+                    type="date"
+                    value={state.personal.dateOfBirth}
+                    onChange={(e) =>
+                      dispatch({ type: "UPDATE_PERSONAL", data: { dateOfBirth: e.target.value } })
+                    }
+                    className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                  />
+                </Field>
+              </section>
             )}
-          </motion.button>
-        </motion.div>
+
+            {/* Step 2: Address */}
+            {state.currentStep === "address" && (
+              <section aria-labelledby={`${uid}-address-title`} className="space-y-4">
+                <h2 id={`${uid}-address-title`} className="text-xl font-bold text-pluto-900">
+                  {t("addressInfo")}
+                </h2>
+
+                <Field id={`${uid}-street`} label={t("street") || "Street"}>
+                  <input
+                    id={`${uid}-street`}
+                    type="text"
+                    placeholder={t("street")}
+                    value={state.address.street}
+                    onChange={(e) =>
+                      dispatch({ type: "UPDATE_ADDRESS", data: { street: e.target.value } })
+                    }
+                    className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                  />
+                </Field>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <Field id={`${uid}-city`} label={t("city") || "City"}>
+                    <input
+                      id={`${uid}-city`}
+                      type="text"
+                      placeholder={t("city")}
+                      value={state.address.city}
+                      onChange={(e) =>
+                        dispatch({ type: "UPDATE_ADDRESS", data: { city: e.target.value } })
+                      }
+                      className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                    />
+                  </Field>
+
+                  <Field id={`${uid}-addressState`} label={t("state") || "State"}>
+                    <input
+                      id={`${uid}-addressState`}
+                      type="text"
+                      placeholder={t("state")}
+                      value={state.address.state}
+                      onChange={(e) =>
+                        dispatch({ type: "UPDATE_ADDRESS", data: { state: e.target.value } })
+                      }
+                      className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                    />
+                  </Field>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <Field id={`${uid}-postalCode`} label={t("postalCode") || "Postal Code"}>
+                    <input
+                      id={`${uid}-postalCode`}
+                      type="text"
+                      placeholder={t("postalCode")}
+                      value={state.address.postalCode}
+                      onChange={(e) =>
+                        dispatch({ type: "UPDATE_ADDRESS", data: { postalCode: e.target.value } })
+                      }
+                      className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                    />
+                  </Field>
+
+                  <Field id={`${uid}-country`} label={t("country") || "Country"}>
+                    <input
+                      id={`${uid}-country`}
+                      type="text"
+                      placeholder={t("country")}
+                      value={state.address.country}
+                      onChange={(e) =>
+                        dispatch({ type: "UPDATE_ADDRESS", data: { country: e.target.value } })
+                      }
+                      className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                    />
+                  </Field>
+                </div>
+              </section>
+            )}
+
+            {/* Step 3: Documents */}
+            {state.currentStep === "documents" && (
+              <section aria-labelledby={`${uid}-docs-title`} className="space-y-4">
+                <h2 id={`${uid}-docs-title`} className="text-xl font-bold text-pluto-900">
+                  {t("documents")}
+                </h2>
+
+                <Field id={`${uid}-idType`} label={t("idType") || "ID Type"}>
+                  <select
+                    id={`${uid}-idType`}
+                    value={state.documents.idType}
+                    onChange={(e) =>
+                      dispatch({
+                        type: "UPDATE_DOCUMENTS",
+                        data: {
+                          idType: e.target.value as
+                            | "passport"
+                            | "drivers_license"
+                            | "national_id"
+                            | "",
+                        },
+                      })
+                    }
+                    className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                  >
+                    <option value="">{t("selectIdType") || "Select ID type"}</option>
+                    <option value="passport">{t("passport") || "Passport"}</option>
+                    <option value="drivers_license">{t("driversLicense") || "Driver's License"}</option>
+                    <option value="national_id">{t("nationalId") || "National ID"}</option>
+                  </select>
+                </Field>
+
+                <Field id={`${uid}-idNumber`} label={t("idNumber") || "ID Number"}>
+                  <input
+                    id={`${uid}-idNumber`}
+                    type="text"
+                    placeholder={t("idNumber")}
+                    value={state.documents.idNumber}
+                    onChange={(e) =>
+                      dispatch({ type: "UPDATE_DOCUMENTS", data: { idNumber: e.target.value } })
+                    }
+                    className="rounded-xl border border-pluto-200 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+                  />
+                </Field>
+
+                <Field id={`${uid}-idFront`} label={t("idFront") || "ID Front"}>
+                  <input
+                    id={`${uid}-idFront`}
+                    type="file"
+                    accept="image/*,.pdf"
+                    onChange={(e) =>
+                      dispatch({
+                        type: "UPDATE_DOCUMENTS",
+                        data: { idFrontFile: e.target.files?.[0] ?? null },
+                      })
+                    }
+                    className="rounded-xl border border-pluto-200 px-4 py-3 file:mr-4 file:rounded-lg file:border-0 file:bg-pluto-100 file:px-4 file:py-2 file:text-sm"
+                  />
+                </Field>
+
+                <Field id={`${uid}-idBack`} label={t("idBack") || "ID Back"}>
+                  <input
+                    id={`${uid}-idBack`}
+                    type="file"
+                    accept="image/*,.pdf"
+                    onChange={(e) =>
+                      dispatch({
+                        type: "UPDATE_DOCUMENTS",
+                        data: { idBackFile: e.target.files?.[0] ?? null },
+                      })
+                    }
+                    className="rounded-xl border border-pluto-200 px-4 py-3 file:mr-4 file:rounded-lg file:border-0 file:bg-pluto-100 file:px-4 file:py-2 file:text-sm"
+                  />
+                </Field>
+
+                <Field id={`${uid}-selfie`} label={t("selfie") || "Selfie"}>
+                  <input
+                    id={`${uid}-selfie`}
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) =>
+                      dispatch({
+                        type: "UPDATE_DOCUMENTS",
+                        data: { selfieFile: e.target.files?.[0] ?? null },
+                      })
+                    }
+                    className="rounded-xl border border-pluto-200 px-4 py-3 file:mr-4 file:rounded-lg file:border-0 file:bg-pluto-100 file:px-4 file:py-2 file:text-sm"
+                  />
+                </Field>
+              </section>
+            )}
+
+            {/* Step 4: Review */}
+            {state.currentStep === "review" && (
+              <section aria-labelledby={`${uid}-review-title`} className="space-y-4">
+                <h2 id={`${uid}-review-title`} className="text-xl font-bold text-pluto-900">
+                  {t("review")}
+                </h2>
+
+                <dl className="divide-y divide-pluto-100 rounded-xl border border-pluto-100 text-sm">
+                  {[
+                    { label: t("firstName") || "First Name", value: state.personal.firstName },
+                    { label: t("lastName") || "Last Name", value: state.personal.lastName },
+                    { label: t("dateOfBirth") || "Date of Birth", value: state.personal.dateOfBirth },
+                    { label: t("city") || "City", value: state.address.city },
+                    { label: t("country") || "Country", value: state.address.country },
+                    { label: t("idType") || "ID Type", value: state.documents.idType },
+                    { label: t("idNumber") || "ID Number", value: state.documents.idNumber },
+                  ].map(({ label, value }) => (
+                    <div key={label} className="flex justify-between px-4 py-2">
+                      <dt className="font-medium text-pluto-600">{label}</dt>
+                      <dd className="text-pluto-900">{value || "—"}</dd>
+                    </div>
+                  ))}
+                </dl>
+
+                {state.error && (
+                  <motion.p
+                    role="alert"
+                    className="text-sm text-red-600"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                  >
+                    {state.error}
+                  </motion.p>
+                )}
+              </section>
+            )}
+          </motion.div>
+        </AnimatePresence>
+
+        {/* ── Navigation buttons ── */}
+        <div className="flex gap-4 pt-2">
+          <button
+            type="button"
+            onClick={goBack}
+            disabled={stepIndex === 0}
+            className="flex-1 rounded-xl border border-pluto-200 bg-white px-6 py-3 font-semibold text-pluto-900 hover:bg-pluto-50 focus:outline-none focus:ring-2 focus:ring-pluto-400 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {t("back")}
+          </button>
+
+          {state.currentStep !== "review" ? (
+            <button
+              type="button"
+              onClick={goNext}
+              className="flex-1 rounded-xl bg-pluto-600 px-6 py-3 font-semibold text-white hover:bg-pluto-700 focus:outline-none focus:ring-2 focus:ring-pluto-400"
+            >
+              {t("next")}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleSubmit()}
+              disabled={state.isSubmitting}
+              aria-describedby={`${uid}-submit-status`}
+              className="flex-1 rounded-xl bg-pluto-600 px-6 py-3 font-semibold text-white hover:bg-pluto-700 focus:outline-none focus:ring-2 focus:ring-pluto-400 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {state.isSubmitting ? (
+                <span className="flex items-center justify-center gap-2">
+                  <motion.span
+                    className="inline-block h-4 w-4 rounded-full border-2 border-white border-t-transparent"
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                    aria-hidden="true"
+                  />
+                  {t("submitting") || "Submitting..."}
+                </span>
+              ) : (
+                t("submit")
+              )}
+            </button>
+          )}
+        </div>
 
         {/* Submit status for screen readers */}
-        <div id="submit-status" className="sr-only">
-          {isPending && kycState.submitted && (t("kyc.confirming") || "Confirming submission...")}
-          {!isPending && kycState.submitted && (t("kyc.submitSuccess") || "Form submitted successfully")}
+        <div id={`${uid}-submit-status`} className="sr-only" aria-live="polite">
+          {state.isSubmitting && (t("submitting") || "Submitting your KYC information...")}
         </div>
-      </motion.form>
+      </div>
     </div>
   );
-};
+}
 
-export default KYCSubmissionForm;
+export default KycSubmissionForm;
