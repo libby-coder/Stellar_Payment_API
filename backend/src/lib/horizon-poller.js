@@ -43,6 +43,9 @@ import { logger } from "./logger.js";
 import {
   paymentConfirmedCounter,
   paymentConfirmationLatency,
+  ledgerMonitorCycleDuration,
+  ledgerMonitorPaymentsChecked,
+  ledgerMonitorCircuitBreakerTrips,
 } from "./metrics.js";
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
@@ -198,6 +201,8 @@ async function pollPendingPayments() {
   if (_running) return; // skip if previous cycle still running
   _running = true;
 
+  const cycleStartTime = Date.now();
+
   try {
     // ── Circuit breaker check ─────────────────────────────────────────────
     if (_circuitBreakerOpenAt > 0) {
@@ -236,6 +241,7 @@ async function pollPendingPayments() {
       // Trip circuit breaker after too many consecutive failures
       if (_consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         _circuitBreakerOpenAt = Date.now();
+        ledgerMonitorCircuitBreakerTrips.inc();
         logger.error(
           { consecutiveFailures: _consecutiveFailures, resetMs: CIRCUIT_BREAKER_RESET_MS },
           "Horizon poller: circuit breaker tripped — pausing polling",
@@ -278,9 +284,18 @@ async function pollPendingPayments() {
       })
     );
 
+    // Record metrics for payment check results
+    results.forEach((result) => {
+      if (result.status === 'rejected') {
+        logger.warn({ err: result.reason }, "Horizon poller: payment group processing failed");
+      }
+    });
+
   } catch (err) {
     logger.warn({ err }, "Horizon poller: unexpected error in poll cycle");
   } finally {
+    const cycleDuration = (Date.now() - cycleStartTime) / 1000;
+    ledgerMonitorCycleDuration.observe(cycleDuration);
     _running = false;
   }
 }
@@ -295,6 +310,7 @@ async function checkPayment(payment, { merchantConfigCache = new Map() } = {}) {
         { paymentId: payment.id },
         "Horizon poller: skipping payment with missing asset or recipient",
       );
+      ledgerMonitorPaymentsChecked.inc({ result: "skipped" });
       return;
     }
 
@@ -319,6 +335,7 @@ async function checkPayment(payment, { merchantConfigCache = new Map() } = {}) {
         { err: horizonErr, paymentId: payment.id },
         "Horizon poller: Horizon error during payment lookup — will retry next cycle",
       );
+      ledgerMonitorPaymentsChecked.inc({ result: "skipped" });
       return;
     }
 
@@ -383,6 +400,7 @@ async function checkPayment(payment, { merchantConfigCache = new Map() } = {}) {
             { paymentId: payment.id, expected, received },
             "Horizon poller: underpayment detected — marked failed",
           );
+          ledgerMonitorPaymentsChecked.inc({ result: "failed" });
 
           streamManager.notify(payment.id, "payment.failed", {
             status: "failed",
@@ -424,6 +442,7 @@ async function checkPayment(payment, { merchantConfigCache = new Map() } = {}) {
             { paymentId: payment.id, expected, received },
             "Horizon poller: overpayment — confirmed with flag",
           );
+          ledgerMonitorPaymentsChecked.inc({ result: "confirmed" });
           streamManager.notify(payment.id, "payment.confirmed", {
             status: "confirmed",
             tx_id: anyPayment.transaction_hash,
@@ -514,6 +533,7 @@ async function checkPayment(payment, { merchantConfigCache = new Map() } = {}) {
       { paymentId: payment.id, txHash: match.transaction_hash },
       "Horizon poller: payment confirmed",
     );
+    ledgerMonitorPaymentsChecked.inc({ result: "confirmed" });
 
     // SSE → customer checkout page
     streamManager.notify(payment.id, "payment.confirmed", {
@@ -582,6 +602,7 @@ async function checkPayment(payment, { merchantConfigCache = new Map() } = {}) {
   } catch (err) {
     // Non-fatal — log and continue with other payments
     logger.warn({ err, paymentId: payment.id }, "Horizon poller: error checking payment");
+    ledgerMonitorPaymentsChecked.inc({ result: "skipped" });
   }
 }
 
