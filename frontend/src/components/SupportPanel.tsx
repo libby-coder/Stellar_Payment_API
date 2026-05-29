@@ -6,6 +6,7 @@ import { getAccountBalances, type AssetBalance } from "@/lib/stellar";
 import { Spinner } from "./ui/Spinner";
 import { TransactionResultModal } from "./TransactionResultModal";
 import { toast } from "sonner";
+import { motion, AnimatePresence } from "framer-motion";
 import { useBalanceSync } from "@/hooks/useBalanceSync";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -38,7 +39,17 @@ export function SupportPanel() {
 
   const selectedBalance = (balances as any).find((b: any) => b.code === assetCode)?.balance ?? "0";
   const isUnfunded = visitorAddress && balances.length === 0 && !loadingBalance;
-  
+
+  // Single authoritative screen-reader announcement for real-time balance sync,
+  // so updates are spoken as one clear message instead of raw visual swaps.
+  const balanceAnnouncement = !visitorAddress
+    ? ""
+    : loadingBalance
+      ? "Syncing wallet balance…"
+      : isUnfunded
+        ? "Wallet is unfunded."
+        : `Balance synced: ${selectedBalance} ${assetCode}.`;
+
   const handleAmountChange = (val: string) => {
     setAmount(val);
   };
@@ -94,6 +105,11 @@ export function SupportPanel() {
 
   return (
     <div className="flex flex-col gap-5 p-1">
+      {/* Authoritative live region for real-time balance-sync announcements */}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {balanceAnnouncement}
+      </div>
+
       <div className="space-y-4">
         {/* Wallet Info */}
         <div className="flex items-center justify-between text-[11px] font-mono uppercase tracking-wider">
@@ -110,6 +126,50 @@ export function SupportPanel() {
           <div className="flex justify-between items-end">
             <label className="text-xs font-semibold text-white" htmlFor="amount-input">Amount</label>
             <div className="text-[10px] text-slate-400" aria-live="polite" aria-atomic="true">
+              <AnimatePresence mode="wait" initial={false}>
+                {loadingBalance ? (
+                  <motion.div
+                    key="loading"
+                    initial={{ opacity: 0, y: -4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    transition={{ duration: 0.18 }}
+                    className="flex items-center gap-2"
+                  >
+                    <span className="sr-only">Loading balance...</span>
+                    <Spinner size="xs" aria-hidden="true" />
+                  </motion.div>
+                ) : isUnfunded ? (
+                  <motion.a
+                    key="unfunded"
+                    initial={{ opacity: 0, y: -4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    transition={{ duration: 0.18 }}
+                    href="https://laboratory.stellar.org/#account-creator?network=testnet"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-block text-yellow-400 hover:underline"
+                  >
+                    Unfunded (Fund on Testnet)
+                  </motion.a>
+                ) : (
+                  // Keying by value animates the figure each time polling syncs a new balance.
+                  <motion.span
+                    key={`balance-${selectedBalance}-${assetCode}`}
+                    initial={{ opacity: 0, y: -4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    transition={{ duration: 0.18 }}
+                    className="inline-block"
+                    aria-label={`Available balance: ${selectedBalance} ${assetCode}`}
+                  >
+                    Available: {selectedBalance} {assetCode}
+                  </motion.span>
+                )}
+              </AnimatePresence>
+            {/* Visual-only — announcements are handled by the live region above. */}
+            <div className="text-[10px] text-slate-400">
               {loadingBalance ? (
                 <div className="flex items-center gap-2">
                   <span className="sr-only">Loading balance...</span>
