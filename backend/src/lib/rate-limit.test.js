@@ -11,12 +11,18 @@ vi.mock("redis", () => ({
 import {
   createMerchantSecurityActionRateLimit,
   createRedisRateLimitStore,
+  createSep10ChallengeRateLimit,
+  createSep10VerifyRateLimit,
   createVerifyPaymentRateLimit,
   getMerchantSecurityActionRateLimitKey,
+  getSep10ChallengeRateLimitKey,
+  getSep10VerifyRateLimitKey,
   getVerifyPaymentRateLimitKey,
   MERCHANT_SECURITY_ACTION_RATE_LIMIT_MAX,
   MERCHANT_SECURITY_ACTION_RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_REDIS_PREFIX,
+  SEP10_CHALLENGE_RATE_LIMIT_MAX,
+  SEP10_VERIFY_RATE_LIMIT_MAX,
   VERIFY_PAYMENT_RATE_LIMIT_MAX,
   VERIFY_PAYMENT_RATE_LIMIT_WINDOW_MS,
 } from "./rate-limit.js";
@@ -147,6 +153,31 @@ describe("getMerchantSecurityActionRateLimitKey", () => {
         ip: "203.0.113.10",
       }),
     ).toMatch(/^api:[a-f0-9]{64}$/);
+  });
+});
+
+describe("SEP-10 rate limiters", () => {
+  it("builds challenge keys scoped to account and IP", () => {
+    const key = getSep10ChallengeRateLimitKey({
+      body: { account: "GABC" },
+      ip: "198.51.100.2",
+    });
+    expect(key).toBe("sep10:challenge:GABC:198.51.100.2");
+  });
+
+  it("builds verify keys scoped to client IP", () => {
+    const key = getSep10VerifyRateLimitKey({ ip: "198.51.100.2" });
+    expect(key).toBe("sep10:verify:198.51.100.2");
+  });
+
+  it("creates challenge and verify limiters with configured defaults", () => {
+    const challenge = createSep10ChallengeRateLimit();
+    const verify = createSep10VerifyRateLimit();
+
+    expect(challenge).toBeDefined();
+    expect(verify).toBeDefined();
+    expect(SEP10_CHALLENGE_RATE_LIMIT_MAX).toBeGreaterThan(0);
+    expect(SEP10_VERIFY_RATE_LIMIT_MAX).toBeGreaterThan(0);
   });
 });
 

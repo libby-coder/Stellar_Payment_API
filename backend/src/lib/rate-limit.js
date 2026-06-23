@@ -7,6 +7,18 @@ export const VERIFY_PAYMENT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 export const VERIFY_PAYMENT_RATE_LIMIT_MAX = 30;
 export const MERCHANT_SECURITY_ACTION_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 export const MERCHANT_SECURITY_ACTION_RATE_LIMIT_MAX = 10;
+export const SEP10_CHALLENGE_RATE_LIMIT_WINDOW_MS = Number(
+  process.env.SEP10_CHALLENGE_RATE_LIMIT_WINDOW_MS || 60 * 1000,
+);
+export const SEP10_CHALLENGE_RATE_LIMIT_MAX = Number(
+  process.env.SEP10_CHALLENGE_RATE_LIMIT_MAX || 20,
+);
+export const SEP10_VERIFY_RATE_LIMIT_WINDOW_MS = Number(
+  process.env.SEP10_VERIFY_RATE_LIMIT_WINDOW_MS || 60 * 1000,
+);
+export const SEP10_VERIFY_RATE_LIMIT_MAX = Number(
+  process.env.SEP10_VERIFY_RATE_LIMIT_MAX || 10,
+);
 
 function setStandardRateLimitHeaders(res, rateLimitState) {
   if (!res || !rateLimitState) {
@@ -114,6 +126,72 @@ export function createMerchantSecurityActionRateLimit({
     requestWasSuccessful: (req, res) => {
       setStandardRateLimitHeaders(res, req.rateLimit);
       return res.statusCode < 400;
+    },
+    store,
+    passOnStoreError: true,
+  });
+}
+
+export function getSep10ChallengeRateLimitKey(req) {
+  const account =
+    typeof req?.body?.account === "string" && req.body.account.trim().length > 0
+      ? req.body.account.trim()
+      : "unknown-account";
+  const ipKey = ipKeyGenerator(req?.ip ?? req?.socket?.remoteAddress ?? "unknown-ip");
+  return `sep10:challenge:${account}:${ipKey}`;
+}
+
+export function getSep10VerifyRateLimitKey(req) {
+  const ipKey = ipKeyGenerator(req?.ip ?? req?.socket?.remoteAddress ?? "unknown-ip");
+  return `sep10:verify:${ipKey}`;
+}
+
+export function createSep10ChallengeRateLimit({
+  store,
+  rateLimitFactory = rateLimit,
+  max = SEP10_CHALLENGE_RATE_LIMIT_MAX,
+  windowMs = SEP10_CHALLENGE_RATE_LIMIT_WINDOW_MS,
+} = {}) {
+  return rateLimitFactory({
+    windowMs,
+    max,
+    message: {
+      error: "Too many challenge requests, please try again later.",
+      code: "SEP10_RATE_LIMITED",
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { ip: false },
+    keyGenerator: getSep10ChallengeRateLimitKey,
+    handler: (req, res, _next, options) => {
+      setStandardRateLimitHeaders(res, req.rateLimit);
+      res.status(options.statusCode).json(options.message);
+    },
+    store,
+    passOnStoreError: true,
+  });
+}
+
+export function createSep10VerifyRateLimit({
+  store,
+  rateLimitFactory = rateLimit,
+  max = SEP10_VERIFY_RATE_LIMIT_MAX,
+  windowMs = SEP10_VERIFY_RATE_LIMIT_WINDOW_MS,
+} = {}) {
+  return rateLimitFactory({
+    windowMs,
+    max,
+    message: {
+      error: "Too many verification attempts, please try again later.",
+      code: "SEP10_RATE_LIMITED",
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { ip: false },
+    keyGenerator: getSep10VerifyRateLimitKey,
+    handler: (req, res, _next, options) => {
+      setStandardRateLimitHeaders(res, req.rateLimit);
+      res.status(options.statusCode).json(options.message);
     },
     store,
     passOnStoreError: true,

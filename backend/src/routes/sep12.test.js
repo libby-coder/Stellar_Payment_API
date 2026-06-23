@@ -42,6 +42,7 @@ vi.mock("../lib/logger.js", () => ({
 import createSep12Router, {
   buildSep12RateLimitKey,
   createSep12RateLimit,
+  createSep12WriteRateLimit,
 } from "./sep12.js";
 
 function createApp(router) {
@@ -109,6 +110,37 @@ describe("SEP-12 routes", () => {
     expect(limited.body).toEqual({
       error: "TOO_MANY_REQUESTS",
       message: "Too many KYC requests, please try again later",
+    });
+  });
+
+  it("rate-limits repeated KYC write requests per account", async () => {
+    mockPutCustomer.mockResolvedValue({ id: "kyc-1", status: "pending" });
+    const limiter = createSep12WriteRateLimit({ max: 1, windowMs: 60_000 });
+    const app = createApp(
+      (() => {
+        const router = express.Router();
+        router.use(limiter);
+        router.put("/sep12/customer", async (req, res) => {
+          const result = await mockPutCustomer(req.body);
+          res.status(202).json(result);
+        });
+        return router;
+      })(),
+    );
+
+    await request(app)
+      .put("/sep12/customer")
+      .send({ account: "G-ONE", fields: { first_name: "Ada" } })
+      .expect(202);
+
+    const limited = await request(app)
+      .put("/sep12/customer")
+      .send({ account: "G-ONE", fields: { first_name: "Grace" } });
+
+    expect(limited.status).toBe(429);
+    expect(limited.body).toEqual({
+      error: "TOO_MANY_REQUESTS",
+      message: "Too many KYC write requests, please try again later",
     });
   });
 });

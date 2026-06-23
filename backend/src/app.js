@@ -19,7 +19,7 @@ import createSep12Router from "./routes/sep12.js";
 import trustlinesRouter from "./routes/trustlines.js";
 import paymentDetailsRouter from "./routes/paymentDetails.js";
 import x402Router from "./routes/x402.js";
-import authRouter from "./routes/auth.js";
+import createAuthRouter from "./routes/auth.js";
 
 import { requireApiKeyAuth } from "./lib/auth.js";
 import { isHorizonReachable } from "./lib/stellar.js";
@@ -33,6 +33,8 @@ import {
   createRedisRateLimitStore,
   createVerifyPaymentRateLimit,
   createMerchantRegistrationRateLimit,
+  createSep10ChallengeRateLimit,
+  createSep10VerifyRateLimit,
 } from "./lib/rate-limit.js";
 import { versionDeprecationMiddleware } from "./lib/version-deprecation.js";
 
@@ -250,6 +252,15 @@ export async function createApp({ redisClient }) {
 
   const merchantRegistrationRateLimit = createMerchantRegistrationRateLimit({
     store: redisAvailable ? createRedisRateLimitStore({ client: redisClient }) : undefined,
+  });
+
+  const sep10RateLimitStore = redisAvailable
+    ? createRedisRateLimitStore({ client: redisClient, prefix: "rl:sep10:" })
+    : undefined;
+
+  const authRouter = createAuthRouter({
+    sep10ChallengeRateLimit: createSep10ChallengeRateLimit({ store: sep10RateLimitStore }),
+    sep10VerifyRateLimit: createSep10VerifyRateLimit({ store: sep10RateLimitStore }),
   });
 
   // x402 pay-per-request on payment creation endpoints (custom middleware flow)
