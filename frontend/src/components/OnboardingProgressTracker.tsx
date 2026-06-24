@@ -205,6 +205,8 @@ export const OnboardingProgressTracker: React.FC<OnboardingProgressTrackerProps>
    */
   const handleStepClick = useCallback(
     async (stepId: string) => {
+      if (state.isPending) return;
+
       const step = sortedSteps.find((s) => s.id === stepId);
       if (!step) return;
 
@@ -359,6 +361,8 @@ export const OnboardingProgressTracker: React.FC<OnboardingProgressTrackerProps>
           <AnimatePresence mode="popLayout">
             {sortedSteps.map((step, index) => {
               const isCurrentStep = effectiveCurrentStep === step.id;
+              const isPendingStep = state.isPending && isCurrentStep;
+              const stepDescriptionId = `${progressSummaryId}-step-${index + 1}-description`;
 
               return (
                 <motion.li
@@ -401,8 +405,10 @@ export const OnboardingProgressTracker: React.FC<OnboardingProgressTrackerProps>
                     aria-setsize={sortedSteps.length}
                     aria-posinset={index + 1}
                     aria-roledescription="onboarding step"
-                    aria-busy={state.isPending && isCurrentStep}
-                    disabled={false}
+                    aria-describedby={stepDescriptionId}
+                    aria-busy={isPendingStep}
+                    aria-disabled={state.isPending ? "true" : undefined}
+                    disabled={state.isPending}
                   >
                     <AnimatePresence mode="wait">
                       {step.completed ? (
