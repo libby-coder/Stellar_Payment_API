@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useMemo, useEffect, useReducer, useRef } from "react";
+import React, { useCallback, useMemo, useEffect, useId, useReducer, useRef } from "react";
 import { motion, AnimatePresence, useReducedMotion, type Variants } from "framer-motion";
 import { useTranslations } from "next-intl";
 import { onboardingReducer, createInitialOnboardingState } from "./onboarding-reducer";
@@ -152,7 +152,7 @@ export const OnboardingProgressTracker: React.FC<OnboardingProgressTrackerProps>
   orientation = "vertical",
   compact = false,
 }) => {
-  const t = useTranslations();
+  const t = useTranslations();`n  const progressSummaryId = useId();
 
   // Respect user's OS-level "reduce motion" preference — #809
   const prefersReducedMotion = useReducedMotion();
@@ -221,7 +221,7 @@ export const OnboardingProgressTracker: React.FC<OnboardingProgressTrackerProps>
         dispatch({ type: "SET_ANNOUNCEMENT", payload: rollbackAnnouncement });
       }
     },
-    [sortedSteps, effectiveCurrentStep, onStepChange, t]
+    [sortedSteps, effectiveCurrentStep, onStepChange, state.isPending, t]
   );
 
   /** Announce completion and fire callback — #811 */
@@ -253,7 +253,7 @@ export const OnboardingProgressTracker: React.FC<OnboardingProgressTrackerProps>
       aria-live="polite"
       aria-atomic="false"
     >
-      {/* Screen reader live announcement area — #811 */}
+      <p id={progressSummaryId} className="sr-only">`n        {progressSummary}`n      </p>`n`n      {/* Screen reader live announcement area — #811 */}
       <div
         className="sr-only"
         role="status"
@@ -301,7 +301,7 @@ export const OnboardingProgressTracker: React.FC<OnboardingProgressTrackerProps>
             aria-valuenow={progressPercentage}
             aria-valuemin={0}
             aria-valuemax={100}
-            aria-label={t("onboarding.progressBar") || "Overall onboarding progress"}
+            aria-label={t("onboarding.progressBar") || "Overall onboarding progress"}`n            aria-describedby={progressSummaryId}
           >
             <motion.div
               className="h-full bg-gradient-to-r from-pluto-500 via-pluto-600 to-pluto-700"
@@ -315,7 +315,7 @@ export const OnboardingProgressTracker: React.FC<OnboardingProgressTrackerProps>
 
           {/* Status text */}
           <p className="mt-2 text-xs text-[#6B6B6B]" aria-hidden="true">
-            {sortedSteps.filter((s) => s.completed).length} of{" "}
+            {completedStepsCount} of{" "}
             {sortedSteps.length} steps completed
             {isOnboardingComplete && (
               <span className="ml-2 inline-flex items-center gap-1 font-medium text-pluto-700">
@@ -336,7 +336,7 @@ export const OnboardingProgressTracker: React.FC<OnboardingProgressTrackerProps>
         <motion.ol
           className={`space-y-3 ${orientation === "horizontal" ? "flex gap-4 space-y-0" : ""}`}
           role="list"
-          aria-label={t("onboarding.stepsList") || "Onboarding steps"}
+          aria-label={t("onboarding.stepsList") || "Onboarding steps"}`n          aria-orientation={orientation}
           variants={containerVariants}
           initial="hidden"
           animate="visible"
