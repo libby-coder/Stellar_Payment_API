@@ -13,6 +13,13 @@ import {
 const STEPS: KycStep[] = ["personal", "address", "documents", "review"];
 const TOTAL_STEPS = STEPS.length;
 
+const STEP_LABEL_KEYS: Record<KycStep, string> = {
+  personal: "personalInfo",
+  address: "addressInfo",
+  documents: "documents",
+  review: "review",
+};
+
 const stepVariants: Variants = {
   enter: (dir: number) => ({
     x: dir > 0 ? 48 : -48,
@@ -101,8 +108,9 @@ function KycSubmissionForm() {
       setDirection(1);
       dispatch({ type: "SET_STEP", step: STEPS[stepIndex + 1]! });
       setStepErrors({});
+      const nextStep = STEPS[stepIndex + 1]!;
       setAnnouncement(
-        `${t("step") || "Step"} ${stepIndex + 2} ${t("of") || "of"} ${TOTAL_STEPS}`,
+        `${t("step") || "Step"} ${stepIndex + 2} ${t("of") || "of"} ${TOTAL_STEPS}: ${t(STEP_LABEL_KEYS[nextStep]) || nextStep}`,
       );
     }
   }, [validateCurrentStep, stepIndex, t]);
@@ -220,7 +228,7 @@ function KycSubmissionForm() {
           aria-valuenow={stepIndex + 1}
           aria-valuemin={1}
           aria-valuemax={TOTAL_STEPS}
-          aria-label={`${t("step") || "Step"} ${stepIndex + 1} ${t("of") || "of"} ${TOTAL_STEPS}`}
+          aria-label={`${t("step") || "Step"} ${stepIndex + 1} ${t("of") || "of"} ${TOTAL_STEPS}: ${t(STEP_LABEL_KEYS[state.currentStep]) || state.currentStep}`}
           className="space-y-2"
         >
           <div className="flex justify-between text-xs text-pluto-600">
@@ -233,6 +241,7 @@ function KycSubmissionForm() {
               <div
                 key={s}
                 role="listitem"
+                aria-label={`${t(STEP_LABEL_KEYS[s]) || s} – ${i < stepIndex ? "completed" : i === stepIndex ? "current" : "upcoming"}`}
                 aria-current={i === stepIndex ? "step" : undefined}
                 className={`h-2 flex-1 rounded-full transition-colors duration-300 ${
                   i <= stepIndex ? "bg-pluto-600" : "bg-pluto-100"
@@ -547,6 +556,7 @@ function KycSubmissionForm() {
             type="button"
             onClick={goBack}
             disabled={stepIndex === 0}
+            aria-label={stepIndex > 0 ? `${t("back")} to ${t(STEP_LABEL_KEYS[STEPS[stepIndex - 1]!]) || STEPS[stepIndex - 1]}` : t("back")}
             className="flex-1 rounded-xl border border-pluto-200 bg-white px-6 py-3 font-semibold text-pluto-900 hover:bg-pluto-50 focus:outline-none focus:ring-2 focus:ring-pluto-400 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {t("back")}
@@ -556,6 +566,7 @@ function KycSubmissionForm() {
             <button
               type="button"
               onClick={goNext}
+              aria-label={`${t("next")}: ${t(STEP_LABEL_KEYS[STEPS[stepIndex + 1]!]) || STEPS[stepIndex + 1]}`}
               className="flex-1 rounded-xl bg-pluto-600 px-6 py-3 font-semibold text-white hover:bg-pluto-700 focus:outline-none focus:ring-2 focus:ring-pluto-400"
             >
               {t("next")}
