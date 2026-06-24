@@ -412,4 +412,134 @@ describe("KycSubmissionForm", () => {
     render(React.createElement(KycSubmissionForm));
     expect(screen.getByRole("region")).toBeInTheDocument();
   });
+
+  // ── Screen reader support ─────────────────────────────────────────────────
+
+  it("step listitems have descriptive aria-labels including step name and status", () => {
+    const { container } = render(React.createElement(KycSubmissionForm));
+    const items = container.querySelectorAll('[role="listitem"]');
+    expect(items[0]).toHaveAttribute("aria-label", expect.stringContaining("personalInfo"));
+    expect(items[0]).toHaveAttribute("aria-label", expect.stringContaining("current"));
+    expect(items[1]).toHaveAttribute("aria-label", expect.stringContaining("addressInfo"));
+    expect(items[1]).toHaveAttribute("aria-label", expect.stringContaining("upcoming"));
+  });
+
+  it("step listitem status updates to completed after advancing past it", () => {
+    const { container } = render(React.createElement(KycSubmissionForm));
+    navigateToStep(1);
+    const items = container.querySelectorAll('[role="listitem"]');
+    expect(items[0]).toHaveAttribute("aria-label", expect.stringContaining("completed"));
+    expect(items[1]).toHaveAttribute("aria-label", expect.stringContaining("current"));
+  });
+
+  it("progressbar aria-label includes current step name", () => {
+    render(React.createElement(KycSubmissionForm));
+    const progressbar = screen.getByRole("progressbar");
+    expect(progressbar).toHaveAttribute("aria-label", expect.stringContaining("personalInfo"));
+  });
+
+  it("progressbar aria-label updates to next step name after navigation", () => {
+    render(React.createElement(KycSubmissionForm));
+    navigateToStep(1);
+    const progressbar = screen.getByRole("progressbar");
+    expect(progressbar).toHaveAttribute("aria-label", expect.stringContaining("addressInfo"));
+  });
+
+  it("back button has descriptive aria-label with destination step name", () => {
+    render(React.createElement(KycSubmissionForm));
+    navigateToStep(1);
+    const backBtn = screen.getByText("back").closest("button")!;
+    expect(backBtn).toHaveAttribute("aria-label", expect.stringContaining("personalInfo"));
+  });
+
+  it("next button has descriptive aria-label with destination step name", () => {
+    render(React.createElement(KycSubmissionForm));
+    const nextBtn = screen.getByText("next").closest("button")!;
+    expect(nextBtn).toHaveAttribute("aria-label", expect.stringContaining("addressInfo"));
+  });
+
+  // ── Additional unit tests ─────────────────────────────────────────────────
+
+  it("shows validation error message text for required fields", () => {
+    render(React.createElement(KycSubmissionForm));
+    fireEvent.click(screen.getByText("next"));
+    expect(screen.getAllByText("required").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("sets aria-describedby on invalid firstName input pointing to error element", () => {
+    render(React.createElement(KycSubmissionForm));
+    fireEvent.click(screen.getByText("next"));
+    const firstNameInput = screen.getByPlaceholderText("firstName");
+    const describedBy = firstNameInput.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    // useId() produces IDs with colons — use getElementById, not querySelector
+    const errorEl = document.getElementById(describedBy!);
+    expect(errorEl).toBeInTheDocument();
+  });
+
+  it("clears validation errors after filling required fields and navigating", () => {
+    render(React.createElement(KycSubmissionForm));
+    fireEvent.click(screen.getByText("next"));
+    expect(screen.getByPlaceholderText("firstName")).toHaveAttribute("aria-invalid", "true");
+
+    fillPersonalStep();
+    fireEvent.click(screen.getByText("next"));
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByPlaceholderText("firstName")).toHaveAttribute("aria-invalid", "false");
+  });
+
+  it("accepts file upload on idBack input", () => {
+    render(React.createElement(KycSubmissionForm));
+    navigateToStep(2);
+    const idBackInput = screen.getByLabelText("idBack") as HTMLInputElement;
+    const file = new File(["content"], "id-back.png", { type: "image/png" });
+    fireEvent.change(idBackInput, { target: { files: [file] } });
+    expect(idBackInput.files?.[0]).toBe(file);
+  });
+
+  it("accepts file upload on selfie input", () => {
+    render(React.createElement(KycSubmissionForm));
+    navigateToStep(2);
+    const selfieInput = screen.getByLabelText("selfie") as HTMLInputElement;
+    const file = new File(["content"], "selfie.jpg", { type: "image/jpeg" });
+    fireEvent.change(selfieInput, { target: { files: [file] } });
+    expect(selfieInput.files?.[0]).toBe(file);
+  });
+
+  it("updates idType select on documents step", () => {
+    render(React.createElement(KycSubmissionForm));
+    navigateToStep(2);
+    const select = screen.getByLabelText("idType") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "passport" } });
+    expect(select.value).toBe("passport");
+  });
+
+  it("updates idNumber field on documents step", () => {
+    render(React.createElement(KycSubmissionForm));
+    navigateToStep(2);
+    const idNumberInput = screen.getByPlaceholderText("idNumber") as HTMLInputElement;
+    fireEvent.change(idNumberInput, { target: { value: "A1234567" } });
+    expect(idNumberInput.value).toBe("A1234567");
+  });
+
+  it("review step shows dash for empty optional fields", () => {
+    render(React.createElement(KycSubmissionForm));
+    fillPersonalStep();
+    fireEvent.click(screen.getByText("next")); // → address
+    fireEvent.click(screen.getByText("next")); // → documents
+    fireEvent.click(screen.getByText("next")); // → review
+    // city was not filled, so it renders the placeholder dash
+    const dashes = screen.getAllByText("—");
+    expect(dashes.length).toBeGreaterThan(0);
+  });
+
+  it("shows error alert in review step when submission fails", async () => {
+    (global.fetch as any).mockResolvedValue({ ok: false });
+    render(React.createElement(KycSubmissionForm));
+    navigateToStep(3);
+    fireEvent.click(screen.getByText("submit"));
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeInTheDocument();
+    });
+  });
 });
