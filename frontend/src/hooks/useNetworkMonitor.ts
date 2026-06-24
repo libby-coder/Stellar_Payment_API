@@ -199,10 +199,7 @@ export function useNetworkMonitor({
         event.preventDefault();
         handleRefresh();
       }
-      if (
-        event.key === "Escape" &&
-        getCurrentFocus() === refreshButtonRef.current
-      ) {
+      if (event.key === "Escape") {
         restoreFocus();
       }
     };
