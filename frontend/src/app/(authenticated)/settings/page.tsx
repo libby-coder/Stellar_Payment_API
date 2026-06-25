@@ -1,6 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
+import { useOptimisticUpdate } from "@/hooks/useOptimisticUpdate";
 import { useDropzone } from "react-dropzone";
 import Link from "next/link";
 import Image from "next/image";
@@ -16,6 +24,13 @@ import { useDisplayPreferences } from "@/lib/display-preferences";
 import WebhookHealthIndicator from "@/components/WebhookHealthIndicator";
 import DangerZone from "@/components/DangerZone";
 import { EmailReceiptPreview } from "@/components/EmailReceiptPreview";
+import UserPermissionsManager from "@/components/UserPermissionsManager";
+import {
+  getNextSettingsTab,
+  getSettingsPanelDomId,
+  getSettingsTabDomId,
+  type SettingsTab,
+} from "./accessibility";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const HEX_COLOR_REGEX = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/;
@@ -26,7 +41,6 @@ const DEFAULT_BRANDING = {
   logo_url: null as string | null,
 };
 
-type SettingsTab = "api" | "branding" | "display" | "webhooks" | "danger";
 
 interface WebhookDomainVerification {
   status: "verified" | "unverified";
@@ -203,6 +217,25 @@ const NAV_ITEMS: {
     ),
   },
   {
+    id: "permissions",
+    label: "Permissions",
+    icon: (
+      <svg
+        className="h-4 w-4"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth={2}
+          d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a3 3 0 11-6 0 3 3 0 016 0z"
+        />
+      </svg>
+    ),
+  },
+  {
     id: "danger",
     label: "Danger Zone",
     icon: (
@@ -234,18 +267,26 @@ export default function SettingsPage() {
   const [rotateError, setRotateError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<SettingsTab>("api");
   const { hideCents, setHideCents } = useDisplayPreferences();
-  const [branding, setBranding] = useState(DEFAULT_BRANDING);
+  const {
+    state: branding,
+    setState: setBranding,
+    isPending: savingBranding,
+    executeUpdate: executeBrandingUpdate,
+  } = useOptimisticUpdate(DEFAULT_BRANDING);
   const [brandingError, setBrandingError] = useState<string | null>(null);
   const [loadingBranding, setLoadingBranding] = useState(false);
-  const [savingBranding, setSavingBranding] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const [webhookUrl, setWebhookUrl] = useState("");
+  const {
+    state: webhookUrl,
+    setState: setWebhookUrl,
+    isPending: savingWebhook,
+    executeUpdate: executeWebhookUpdate,
+  } = useOptimisticUpdate("");
   const [webhookSecretMasked, setWebhookSecretMasked] = useState("");
   const [webhookNewSecret, setWebhookNewSecret] = useState<string | null>(null);
   const [webhookUrlError, setWebhookUrlError] = useState<string | null>(null);
   const [webhookSaveError, setWebhookSaveError] = useState<string | null>(null);
   const [loadingWebhook, setLoadingWebhook] = useState(false);
-  const [savingWebhook, setSavingWebhook] = useState(false);
   const [regeneratingSecret, setRegeneratingSecret] = useState(false);
   const [confirmRegenSecret, setConfirmRegenSecret] = useState(false);
   const [webhookRevealedSecret, setWebhookRevealedSecret] = useState(false);
@@ -253,6 +294,8 @@ export default function SettingsPage() {
   const [webhookVerification, setWebhookVerification] =
     useState<WebhookDomainVerification | null>(null);
   const [verifyingWebhookDomain, setVerifyingWebhookDomain] = useState(false);
+  const desktopTabRefs = useRef<Partial<Record<SettingsTab, HTMLButtonElement | null>>>({});
+  const mobileTabRefs = useRef<Partial<Record<SettingsTab, HTMLButtonElement | null>>>({});
 
   useHydrateMerchantStore();
 
@@ -379,26 +422,21 @@ export default function SettingsPage() {
         return;
       }
     }
-    setSavingBranding(true);
-    try {
-      const res = await fetch(`${API_URL}/api/merchant-branding`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", "x-api-key": apiKey },
-        body: JSON.stringify(branding),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed to save branding");
-      setBranding(data.branding_config ?? branding);
-      toast.success("Branding saved");
-    } catch (err: unknown) {
-      const msg =
-        err instanceof Error ? err.message : "Failed to save branding";
-      setBrandingError(msg);
-      toast.error(msg);
-    } finally {
-      setSavingBranding(false);
-    }
-  }, [apiKey, branding]);
+    await executeBrandingUpdate(
+      (current) => current, // optimistically keep current branding
+      async () => {
+        const res = await fetch(`${API_URL}/api/merchant-branding`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", "x-api-key": apiKey },
+          body: JSON.stringify(branding),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Failed to save branding");
+        setBranding(data.branding_config ?? branding);
+        toast.success("Branding saved");
+      }
+    );
+  }, [apiKey, branding, executeBrandingUpdate, setBranding]);
 
   const validateWebhookUrl = useCallback((url: string) => {
     if (!url.trim()) return null;
@@ -413,10 +451,10 @@ export default function SettingsPage() {
 
   const handleWebhookUrlChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      setWebhookUrl(e.target.value);
+      setWebhookUrl(() => e.target.value);
       setWebhookUrlError(validateWebhookUrl(e.target.value));
     },
-    [validateWebhookUrl],
+    [validateWebhookUrl, setWebhookUrl],
   );
 
   const saveWebhookUrl = useCallback(async () => {
@@ -426,30 +464,26 @@ export default function SettingsPage() {
       setWebhookUrlError(err);
       return;
     }
-    setSavingWebhook(true);
     setWebhookSaveError(null);
-    try {
-      const res = await fetch(`${API_URL}/api/webhook-settings`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", "x-api-key": apiKey },
-        body: JSON.stringify({ webhook_url: webhookUrl.trim() || undefined }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed to save webhook URL");
-      setWebhookUrl(data.webhook_url ?? "");
-      setWebhookVerification(data.webhook_domain_verification ?? null);
-      toast.success(
-        data.webhook_url ? "Webhook URL saved" : "Webhook URL cleared",
-      );
-    } catch (err: unknown) {
-      const msg =
-        err instanceof Error ? err.message : "Failed to save webhook URL";
-      setWebhookSaveError(msg);
-      toast.error(msg);
-    } finally {
-      setSavingWebhook(false);
-    }
-  }, [apiKey, webhookUrl, validateWebhookUrl]);
+    const optimisticUrl = webhookUrl.trim();
+    await executeWebhookUpdate(
+      () => optimisticUrl, // optimistically show the trimmed URL immediately
+      async () => {
+        const res = await fetch(`${API_URL}/api/webhook-settings`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", "x-api-key": apiKey },
+          body: JSON.stringify({ webhook_url: optimisticUrl || undefined }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Failed to save webhook URL");
+        setWebhookUrl(data.webhook_url ?? "");
+        setWebhookVerification(data.webhook_domain_verification ?? null);
+        toast.success(
+          data.webhook_url ? "Webhook URL saved" : "Webhook URL cleared",
+        );
+      }
+    );
+  }, [apiKey, webhookUrl, validateWebhookUrl, executeWebhookUpdate, setWebhookUrl]);
 
   const verifyWebhookDomain = useCallback(async () => {
     if (!apiKey) return;
@@ -540,6 +574,34 @@ export default function SettingsPage() {
     [webhookVerification],
   );
 
+  const focusTab = useCallback((tab: SettingsTab, variant: "desktop" | "mobile") => {
+    const refMap = variant === "desktop" ? desktopTabRefs.current : mobileTabRefs.current;
+    refMap[tab]?.focus();
+  }, []);
+
+  const handleTabKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLButtonElement>, variant: "desktop" | "mobile") => {
+      const supportedKeys = [
+        "ArrowLeft",
+        "ArrowRight",
+        "ArrowUp",
+        "ArrowDown",
+        "Home",
+        "End",
+      ];
+
+      if (!supportedKeys.includes(event.key)) {
+        return;
+      }
+
+      event.preventDefault();
+      const nextTab = getNextSettingsTab(activeTab, event.key);
+      setActiveTab(nextTab);
+      focusTab(nextTab, variant);
+    },
+    [activeTab, focusTab],
+  );
+
   if (!hydrated) return null;
 
   if (!apiKey) {
@@ -591,16 +653,22 @@ export default function SettingsPage() {
           className="hidden lg:flex w-52 shrink-0 flex-col gap-1"
           role="tablist"
           aria-label="Settings navigation"
+          aria-orientation="vertical"
         >
           {NAV_ITEMS.map((item) => (
             <button
               key={item.id}
-              id={`${item.id}-tab`}
+              id={getSettingsTabDomId(item.id, "desktop")}
               type="button"
               role="tab"
               aria-selected={activeTab === item.id}
-              aria-controls={`${item.id}-panel`}
+              aria-controls={getSettingsPanelDomId(item.id)}
+              tabIndex={activeTab === item.id ? 0 : -1}
+              ref={(node) => {
+                desktopTabRefs.current[item.id] = node;
+              }}
               onClick={() => setActiveTab(item.id)}
+              onKeyDown={(event) => handleTabKeyDown(event, "desktop")}
               className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold text-left transition-all duration-200 ${
                 activeTab === item.id
                   ? item.danger
@@ -622,16 +690,22 @@ export default function SettingsPage() {
           className="lg:hidden flex gap-1 overflow-x-auto rounded-xl border border-[#E8E8E8] bg-[#F5F5F5] p-1 w-full"
           role="tablist"
           aria-label="Settings navigation"
+          aria-orientation="horizontal"
         >
           {NAV_ITEMS.map((item) => (
             <button
               key={item.id}
-              id={`${item.id}-tab-mobile`}
+              id={getSettingsTabDomId(item.id, "mobile")}
               type="button"
               role="tab"
               aria-selected={activeTab === item.id}
-              aria-controls={`${item.id}-panel`}
+              aria-controls={getSettingsPanelDomId(item.id)}
+              tabIndex={activeTab === item.id ? 0 : -1}
+              ref={(node) => {
+                mobileTabRefs.current[item.id] = node;
+              }}
               onClick={() => setActiveTab(item.id)}
+              onKeyDown={(event) => handleTabKeyDown(event, "mobile")}
               className={`shrink-0 rounded-lg px-4 py-2.5 text-[10px] font-bold uppercase tracking-widest transition-all duration-200 ${
                 activeTab === item.id
                   ? item.danger
@@ -652,8 +726,9 @@ export default function SettingsPage() {
           {/* API Keys Tab */}
           {activeTab === "api" && (
             <div
-              id="api-panel"
+              id={getSettingsPanelDomId("api")}
               role="tabpanel"
+              aria-label="API Keys"
               aria-labelledby="api-tab api-tab-mobile"
               tabIndex={0}
               className="rounded-2xl border border-[#E8E8E8] bg-white p-8 flex flex-col gap-8"
@@ -678,6 +753,9 @@ export default function SettingsPage() {
                   <button
                     type="button"
                     onClick={() => setRevealed((v) => !v)}
+                    aria-pressed={revealed}
+                    aria-controls="live-api-key"
+                    aria-describedby="live-api-key-visibility"
                     className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-[#6B6B6B] hover:text-[#0A0A0A] transition-colors"
                   >
                     <EyeIcon open={revealed} /> {revealed ? "Hide" : "Reveal"}
@@ -695,6 +773,13 @@ export default function SettingsPage() {
                 <p className="text-xs text-[#6B6B6B]">
                   Pass as <code className="text-[#0A0A0A]">x-api-key</code>{" "}
                   header on every request.
+                </p>
+                <p
+                  id="live-api-key-visibility"
+                  className="sr-only"
+                  aria-live="polite"
+                >
+                  {revealed ? "Live API key is currently visible." : "Live API key is currently hidden."}
                 </p>
               </div>
 
@@ -761,8 +846,9 @@ export default function SettingsPage() {
           {/* Branding Tab */}
           {activeTab === "branding" && (
             <div
-              id="branding-panel"
+              id={getSettingsPanelDomId("branding")}
               role="tabpanel"
+              aria-label="Branding"
               aria-labelledby="branding-tab branding-tab-mobile"
               tabIndex={0}
               className="rounded-2xl border border-[#E8E8E8] bg-white p-8 flex flex-col gap-8"
@@ -956,8 +1042,9 @@ export default function SettingsPage() {
           {/* Display Tab */}
           {activeTab === "display" && (
             <div
-              id="display-panel"
+              id={getSettingsPanelDomId("display")}
               role="tabpanel"
+              aria-label="Display"
               aria-labelledby="display-tab display-tab-mobile"
               tabIndex={0}
               className="rounded-2xl border border-[#E8E8E8] bg-white p-8 flex flex-col gap-8 max-w-full"
@@ -994,8 +1081,9 @@ export default function SettingsPage() {
           {/* Webhooks Tab */}
           {activeTab === "webhooks" && (
             <div
-              id="webhooks-panel"
+              id={getSettingsPanelDomId("webhooks")}
               role="tabpanel"
+              aria-label="Webhooks"
               aria-labelledby="webhooks-tab webhooks-tab-mobile"
               tabIndex={0}
               className="rounded-2xl border border-[#E8E8E8] bg-white p-8 flex flex-col gap-8 max-w-full"
@@ -1013,6 +1101,8 @@ export default function SettingsPage() {
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
                     <WebhookHealthIndicator webhookUrl={webhookUrl} />
                     <span
+                      role="status"
+                      aria-live="polite"
                       className={`rounded-full border px-3 py-1 text-[9px] font-bold uppercase tracking-widest ${isVerified ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-yellow-200 bg-yellow-50 text-yellow-700"}`}
                     >
                       {isVerified ? "Verified" : "Unverified"}
@@ -1040,10 +1130,14 @@ export default function SettingsPage() {
                   value={webhookUrl}
                   onChange={handleWebhookUrlChange}
                   placeholder="https://example.com/hooks/pluto"
+                  aria-invalid={webhookUrlError ? "true" : "false"}
+                  aria-describedby={webhookUrlError ? "webhook-url-error" : undefined}
                   className={`rounded-xl border bg-[#F9F9F9] px-4 py-3 font-mono text-sm text-[#0A0A0A] focus:outline-none focus:bg-white transition-all ${webhookUrlError ? "border-red-300 focus:border-red-500" : "border-[#E8E8E8] focus:border-[#0A0A0A]"}`}
                 />
                 {webhookUrlError && (
-                  <p className="text-xs text-red-500">{webhookUrlError}</p>
+                  <p id="webhook-url-error" className="text-xs text-red-500" role="alert">
+                    {webhookUrlError}
+                  </p>
                 )}
                 <div className="flex flex-col gap-3 sm:flex-row">
                   <button
@@ -1113,7 +1207,10 @@ export default function SettingsPage() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2 rounded-xl border border-[#E8E8E8] bg-[#F9F9F9] p-1 pl-4">
-                  <code className="flex-1 truncate font-mono text-xs text-[#0A0A0A]">
+                  <code
+                    id="webhook-secret-value"
+                    className="flex-1 truncate font-mono text-xs text-[#0A0A0A]"
+                  >
                     {webhookNewSecret
                       ? webhookRevealedSecret
                         ? webhookNewSecret
@@ -1125,6 +1222,8 @@ export default function SettingsPage() {
                       type="button"
                       onClick={() => setWebhookRevealedSecret((v) => !v)}
                       aria-label={webhookRevealedSecret ? "Hide webhook secret" : "Show webhook secret"}
+                      aria-pressed={webhookRevealedSecret}
+                      aria-controls="webhook-secret-value webhook-secret-visibility"
                       className="p-1 text-[#6B6B6B] hover:text-[#0A0A0A]"
                     >
                       <EyeIcon open={webhookRevealedSecret} />
@@ -1135,8 +1234,15 @@ export default function SettingsPage() {
                   )}
                 </div>
                 {webhookNewSecret && (
-                  <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-center text-[10px] font-bold uppercase tracking-widest text-yellow-800">
-                    Copy now — shown once
+                  <div
+                    id="webhook-secret-visibility"
+                    role="status"
+                    aria-live="polite"
+                    className="rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-center text-[10px] font-bold uppercase tracking-widest text-yellow-800"
+                  >
+                    {webhookRevealedSecret
+                      ? "Webhook secret is visible. Copy now — shown once."
+                      : "Webhook secret is hidden. Toggle reveal to inspect it."}
                   </div>
                 )}
                 {!confirmRegenSecret ? (
@@ -1182,11 +1288,17 @@ export default function SettingsPage() {
             </div>
           )}
 
+          {/* Permissions Tab */}
+          {activeTab === "permissions" && (
+            <UserPermissionsManager />
+          )}
+
           {/* Danger Tab */}
           {activeTab === "danger" && (
             <div
-              id="danger-panel"
+              id={getSettingsPanelDomId("danger")}
               role="tabpanel"
+              aria-label="Danger Zone"
               aria-labelledby="danger-tab danger-tab-mobile"
               tabIndex={0}
               className="rounded-2xl border border-red-200 bg-white p-8 flex flex-col gap-6 max-w-full"

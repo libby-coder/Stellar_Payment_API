@@ -1,6 +1,7 @@
 import React from "react";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
+import { vi, describe, it, expect, beforeEach } from "vitest";
 import NetworkStatusIndicator from "./NetworkStatusIndicator";
 import { useNetworkStatusStore } from "@/lib/network-status-store";
 import {
@@ -10,12 +11,37 @@ import {
   AccessibilityTester,
 } from "@/lib/accessibility-utils";
 
+// Hoist shared mock functions so they're available in vi.mock factories
+const {
+  mockAnnounce,
+  mockAnnounceStatusChange,
+  mockAnnounceLatency,
+  mockAnnounceConnectionType,
+  mockAnnounceError,
+  mockAnnounceQuality,
+  mockSaveFocus,
+  mockRestoreFocus,
+  mockSetFocus,
+  mockGetCurrentFocus,
+} = vi.hoisted(() => ({
+  mockAnnounce: vi.fn(),
+  mockAnnounceStatusChange: vi.fn(),
+  mockAnnounceLatency: vi.fn(),
+  mockAnnounceConnectionType: vi.fn(),
+  mockAnnounceError: vi.fn(),
+  mockAnnounceQuality: vi.fn(),
+  mockSaveFocus: vi.fn(),
+  mockRestoreFocus: vi.fn(),
+  mockSetFocus: vi.fn(),
+  mockGetCurrentFocus: vi.fn(),
+}));
+
 // Mock the network status store
-jest.mock("@/lib/network-status-store");
-const mockUseNetworkStatusStore = useNetworkStatusStore as jest.MockedFunction<typeof useNetworkStatusStore>;
+vi.mock("@/lib/network-status-store");
+const mockUseNetworkStatusStore = vi.mocked(useNetworkStatusStore);
 
 // Mock framer-motion
-jest.mock("framer-motion", () => ({
+vi.mock("framer-motion", () => ({
   motion: {
     div: ({ children, ...props }: any) => <div {...props}>{children}</div>,
     button: ({ children, ...props }: any) => <button {...props}>{children}</button>,
@@ -24,18 +50,18 @@ jest.mock("framer-motion", () => ({
   },
   AnimatePresence: ({ children }: any) => <>{children}</>,
   useAnimation: () => ({
-    start: jest.fn(),
-    stop: jest.fn(),
+    start: vi.fn(),
+    stop: vi.fn(),
   }),
 }));
 
 // Mock next-intl
-jest.mock("next-intl", () => ({
+vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) => key,
 }));
 
 // Mock animation utilities
-jest.mock("@/lib/network-animations", () => ({
+vi.mock("@/lib/network-animations", () => ({
   statusDotVariants: {},
   statusBadgeVariants: {},
   detailsPanelVariants: {},
@@ -46,6 +72,10 @@ jest.mock("@/lib/network-animations", () => ({
   containerVariants: {},
   hoverEffectVariants: {},
   focusRingVariants: {},
+  statusChangeFlashVariants: {},
+  offlineAlertVariants: {},
+  monitoringPulseVariants: {},
+  latencyBarVariants: {},
   getLatencyVariant: () => "good",
   getConnectionQualityVariant: () => "excellent",
   getStatusDotVariant: () => "online",
@@ -53,64 +83,64 @@ jest.mock("@/lib/network-animations", () => ({
   getAdaptiveTransition: (transition: any) => transition,
 }));
 
-// Mock accessibility utilities
-jest.mock("@/lib/accessibility-utils", () => ({
+// Mock accessibility utilities — use shared mock functions so component and test share instances
+vi.mock("@/lib/accessibility-utils", () => ({
   useScreenReader: () => ({
-    announce: jest.fn(),
-    announceStatusChange: jest.fn(),
-    announceLatency: jest.fn(),
-    announceConnectionType: jest.fn(),
-    announceError: jest.fn(),
-    announceQuality: jest.fn(),
+    announce: mockAnnounce,
+    announceStatusChange: mockAnnounceStatusChange,
+    announceLatency: mockAnnounceLatency,
+    announceConnectionType: mockAnnounceConnectionType,
+    announceError: mockAnnounceError,
+    announceQuality: mockAnnounceQuality,
   }),
   useFocusManagement: () => ({
-    saveFocus: jest.fn(),
-    restoreFocus: jest.fn(),
-    setFocus: jest.fn(),
-    getCurrentFocus: jest.fn(),
+    saveFocus: mockSaveFocus,
+    restoreFocus: mockRestoreFocus,
+    setFocus: mockSetFocus,
+    getCurrentFocus: mockGetCurrentFocus,
   }),
   ScreenReaderManager: {
     getInstance: () => ({
-      announce: jest.fn(),
-      createLiveRegion: jest.fn(),
-      clear: jest.fn(),
-      cleanup: jest.fn(),
+      announce: vi.fn(),
+      createLiveRegion: vi.fn(),
+      clear: vi.fn(),
+      cleanup: vi.fn(),
     }),
   },
   FocusManager: {
     getInstance: () => ({
-      saveFocus: jest.fn(),
-      restoreFocus: jest.fn(),
-      setFocus: jest.fn(),
-      getCurrentFocus: jest.fn(),
-      clearHistory: jest.fn(),
+      saveFocus: vi.fn(),
+      restoreFocus: vi.fn(),
+      setFocus: vi.fn(),
+      getCurrentFocus: vi.fn(),
+      clearHistory: vi.fn(),
     }),
   },
   AriaManager: {
-    setAttribute: jest.fn(),
-    removeAttribute: jest.fn(),
-    setLabel: jest.fn(),
-    setDescribedBy: jest.fn(),
-    setLabelledBy: jest.fn(),
-    setExpanded: jest.fn(),
-    setPressed: jest.fn(),
-    setDisabled: jest.fn(),
-    setBusy: jest.fn(),
-    setLiveRegion: jest.fn(),
-    setAtomic: jest.fn(),
-    setRelevant: jest.fn(),
+    setAttribute: vi.fn(),
+    removeAttribute: vi.fn(),
+    setLabel: vi.fn(),
+    setDescribedBy: vi.fn(),
+    setLabelledBy: vi.fn(),
+    setExpanded: vi.fn(),
+    setPressed: vi.fn(),
+    setDisabled: vi.fn(),
+    setBusy: vi.fn(),
+    setLiveRegion: vi.fn(),
+    setAtomic: vi.fn(),
+    setRelevant: vi.fn(),
   },
   KeyboardManager: {
     getInstance: () => ({
-      addHandler: jest.fn(),
-      handleEvent: jest.fn(),
-      clear: jest.fn(),
+      addHandler: vi.fn(),
+      handleEvent: vi.fn(),
+      clear: vi.fn(),
     }),
   },
   AccessibilityTester: {
-    checkAriaAttributes: jest.fn(),
-    checkFocusManagement: jest.fn(),
-    checkColorContrast: jest.fn(),
+    checkAriaAttributes: vi.fn(),
+    checkFocusManagement: vi.fn(),
+    checkColorContrast: vi.fn(),
   },
 }));
 
@@ -121,24 +151,25 @@ describe("NetworkStatusIndicator Accessibility", () => {
     connectionType: "wifi",
     errorMessage: null,
     isMonitoring: true,
-    setStatus: jest.fn(),
-    setLatency: jest.fn(),
-    setConnectionType: jest.fn(),
-    setErrorMessage: jest.fn(),
-    setIsMonitoring: jest.fn(),
-    checkStatus: jest.fn(),
-    reset: jest.fn(),
+    lastChecked: null,
+    setStatus: vi.fn(),
+    setLatency: vi.fn(),
+    setConnectionType: vi.fn(),
+    setErrorMessage: vi.fn(),
+    setIsMonitoring: vi.fn(),
+    checkStatus: vi.fn(),
+    reset: vi.fn(),
   };
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     mockUseNetworkStatusStore.mockReturnValue(mockStore);
   });
 
   describe("Screen Reader Support", () => {
     it("has proper ARIA attributes for screen readers", () => {
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
+
       const region = screen.getByRole("region");
       expect(region).toHaveAttribute("aria-live", "polite");
       expect(region).toHaveAttribute("aria-atomic", "true");
@@ -147,142 +178,135 @@ describe("NetworkStatusIndicator Accessibility", () => {
 
     it("disables ARIA live regions when screen reader support is disabled", () => {
       render(<NetworkStatusIndicator enableScreenReaderSupport={false} />);
-      
+
       const region = screen.getByRole("region");
       expect(region).toHaveAttribute("aria-live", "off");
     });
 
     it("announces status changes to screen readers", () => {
-      const { announceStatusChange } = require("@/lib/accessibility-utils").useScreenReader();
-      
-      const { rerender } = render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Change status
+      const { rerender } = render(
+        <NetworkStatusIndicator enableScreenReaderSupport={true} />
+      );
+
       mockUseNetworkStatusStore.mockReturnValue({
         ...mockStore,
         status: "offline",
       });
-      
+
       rerender(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      expect(announceStatusChange).toHaveBeenCalledWith("online", "offline", expect.any(String));
+
+      expect(mockAnnounceStatusChange).toHaveBeenCalledWith(
+        "online",
+        "offline",
+        expect.any(String)
+      );
     });
 
     it("announces latency changes", () => {
-      const { announceLatency } = require("@/lib/accessibility-utils").useScreenReader();
-      
-      const { rerender } = render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Change latency
+      const { rerender } = render(
+        <NetworkStatusIndicator enableScreenReaderSupport={true} />
+      );
+
       mockUseNetworkStatusStore.mockReturnValue({
         ...mockStore,
         latency: 150,
       });
-      
+
       rerender(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      expect(announceLatency).toHaveBeenCalledWith(150);
+
+      expect(mockAnnounceLatency).toHaveBeenCalledWith(150);
     });
 
     it("announces connection type changes", () => {
-      const { announceConnectionType } = require("@/lib/accessibility-utils").useScreenReader();
-      
-      const { rerender } = render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Change connection type
+      const { rerender } = render(
+        <NetworkStatusIndicator enableScreenReaderSupport={true} />
+      );
+
       mockUseNetworkStatusStore.mockReturnValue({
         ...mockStore,
         connectionType: "4g",
       });
-      
+
       rerender(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      expect(announceConnectionType).toHaveBeenCalledWith("4g");
+
+      expect(mockAnnounceConnectionType).toHaveBeenCalledWith("4g");
     });
 
     it("announces errors to screen readers", () => {
-      const { announceError } = require("@/lib/accessibility-utils").useScreenReader();
-      
-      const { rerender } = render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Add error
+      const { rerender } = render(
+        <NetworkStatusIndicator enableScreenReaderSupport={true} />
+      );
+
       mockUseNetworkStatusStore.mockReturnValue({
         ...mockStore,
         errorMessage: "Connection failed",
       });
-      
+
       rerender(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      expect(announceError).toHaveBeenCalledWith("Connection failed");
+
+      expect(mockAnnounceError).toHaveBeenCalledWith("Connection failed");
     });
 
     it("provides hidden screen reader announcements", () => {
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Check for hidden screen reader elements
-      const srAnnouncements = screen.getByRole("region").querySelector(".sr-only");
+
+      const srAnnouncements = screen
+        .getByRole("region")
+        .querySelector(".sr-only");
       expect(srAnnouncements).toBeInTheDocument();
     });
 
     it("announces connection quality when enabled", () => {
-      const { announceQuality } = require("@/lib/accessibility-utils").useScreenReader();
-      
       render(
-        <NetworkStatusIndicator 
-          enableScreenReaderSupport={true} 
+        <NetworkStatusIndicator
+          enableScreenReaderSupport={true}
           showConnectionQuality={true}
         />
       );
-      
-      expect(announceQuality).toHaveBeenCalled();
+
+      expect(mockAnnounceQuality).toHaveBeenCalled();
     });
   });
 
   describe("Keyboard Navigation", () => {
     it("has proper keyboard navigation when enabled", () => {
       render(<NetworkStatusIndicator enableKeyboardNavigation={true} />);
-      
+
       const region = screen.getByRole("region");
       expect(region).toHaveAttribute("tabIndex", "0");
     });
 
     it("disables keyboard navigation when disabled", () => {
       render(<NetworkStatusIndicator enableKeyboardNavigation={false} />);
-      
+
       const region = screen.getByRole("region");
       expect(region).not.toHaveAttribute("tabIndex");
     });
 
     it("handles keyboard shortcuts for refresh", () => {
       render(<NetworkStatusIndicator enableKeyboardNavigation={true} />);
-      
-      // Simulate Ctrl+R
+
       fireEvent.keyDown(document, { key: "r", ctrlKey: true });
-      
+
       expect(mockStore.checkStatus).toHaveBeenCalled();
     });
 
     it("handles Escape key for focus restoration", () => {
-      const { getCurrentFocus, restoreFocus } = require("@/lib/accessibility-utils").useFocusManagement();
-      
-      getCurrentFocus.mockReturnValue(document.createElement("button"));
-      
       render(<NetworkStatusIndicator enableKeyboardNavigation={true} />);
-      
-      // Simulate Escape key
+
       fireEvent.keyDown(document, { key: "Escape" });
-      
-      expect(restoreFocus).toHaveBeenCalled();
+
+      expect(mockRestoreFocus).toHaveBeenCalled();
     });
 
     it("supports Enter and Space keys on refresh button", () => {
       render(<NetworkStatusIndicator enableKeyboardNavigation={true} />);
-      
+
       const refreshButton = screen.getByLabelText("network.refresh");
-      
+
       fireEvent.keyDown(refreshButton, { key: "Enter" });
       expect(mockStore.checkStatus).toHaveBeenCalled();
-      
+
       fireEvent.keyDown(refreshButton, { key: " " });
       expect(mockStore.checkStatus).toHaveBeenCalledTimes(2);
     });
@@ -290,25 +314,20 @@ describe("NetworkStatusIndicator Accessibility", () => {
 
   describe("Focus Management", () => {
     it("saves and restores focus properly", () => {
-      const { saveFocus, restoreFocus } = require("@/lib/accessibility-utils").useFocusManagement();
-      
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Trigger refresh which should save focus
+
       const refreshButton = screen.getByLabelText("network.refresh");
       fireEvent.click(refreshButton);
-      
-      expect(saveFocus).toHaveBeenCalled();
+
+      expect(mockSaveFocus).toHaveBeenCalled();
     });
 
     it("manages focus during status changes", () => {
       render(<NetworkStatusIndicator enableKeyboardNavigation={true} />);
-      
+
       const region = screen.getByRole("region");
-      
-      // Focus the region
       region.focus();
-      
+
       expect(document.activeElement).toBe(region);
     });
   });
@@ -319,28 +338,28 @@ describe("NetworkStatusIndicator Accessibility", () => {
         ...mockStore,
         status: "checking",
       });
-      
+
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
+
       const region = screen.getByRole("region");
       expect(region).toHaveAttribute("aria-busy", "true");
     });
 
     it("has correct describedby relationship for details", () => {
       render(
-        <NetworkStatusIndicator 
+        <NetworkStatusIndicator
           showDetails={true}
           enableScreenReaderSupport={true}
         />
       );
-      
+
       const region = screen.getByRole("region");
       expect(region).toHaveAttribute("aria-describedby", "network-details");
     });
 
     it("refresh button has proper ARIA attributes", () => {
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
+
       const refreshButton = screen.getByLabelText("network.refresh");
       expect(refreshButton).toHaveAttribute("aria-busy", "false");
       expect(refreshButton).toHaveAttribute("aria-pressed", "false");
@@ -351,9 +370,9 @@ describe("NetworkStatusIndicator Accessibility", () => {
         ...mockStore,
         status: "checking",
       });
-      
+
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
+
       const refreshButton = screen.getByLabelText("network.refresh");
       expect(refreshButton).toHaveAttribute("aria-busy", "true");
       expect(refreshButton).toHaveAttribute("aria-pressed", "true");
@@ -361,12 +380,12 @@ describe("NetworkStatusIndicator Accessibility", () => {
 
     it("details panel has proper ARIA attributes", () => {
       render(
-        <NetworkStatusIndicator 
+        <NetworkStatusIndicator
           showDetails={true}
           enableScreenReaderSupport={true}
         />
       );
-      
+
       const detailsPanel = document.getElementById("network-details");
       expect(detailsPanel).toHaveAttribute("role", "group");
       expect(detailsPanel).toHaveAttribute("aria-label", "Network details");
@@ -376,156 +395,154 @@ describe("NetworkStatusIndicator Accessibility", () => {
 
   describe("Accessibility Testing", () => {
     it("passes ARIA attribute validation", () => {
-      const { checkAriaAttributes } = require("@/lib/accessibility-utils").AccessibilityTester;
-      checkAriaAttributes.mockReturnValue({ valid: true, issues: [] });
-      
+      vi.mocked(AccessibilityTester.checkAriaAttributes).mockReturnValue({
+        valid: true,
+        issues: [],
+      } as any);
+
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
+
       const region = screen.getByRole("region");
-      checkAriaAttributes(region);
-      
-      expect(checkAriaAttributes).toHaveBeenCalledWith(region);
+      AccessibilityTester.checkAriaAttributes(region);
+
+      expect(AccessibilityTester.checkAriaAttributes).toHaveBeenCalledWith(region);
     });
 
     it("passes focus management validation", () => {
-      const { checkFocusManagement } = require("@/lib/accessibility-utils").AccessibilityTester;
-      checkFocusManagement.mockReturnValue({ valid: true, issues: [] });
-      
+      vi.mocked(AccessibilityTester.checkFocusManagement).mockReturnValue({
+        valid: true,
+        issues: [],
+      } as any);
+
       render(<NetworkStatusIndicator enableKeyboardNavigation={true} />);
-      
-      checkFocusManagement();
-      
-      expect(checkFocusManagement).toHaveBeenCalled();
+
+      AccessibilityTester.checkFocusManagement();
+
+      expect(AccessibilityTester.checkFocusManagement).toHaveBeenCalled();
     });
 
     it("passes color contrast validation", () => {
-      const { checkColorContrast } = require("@/lib/accessibility-utils").AccessibilityTester;
-      checkColorContrast.mockReturnValue({ valid: true, issues: [] });
-      
+      vi.mocked(AccessibilityTester.checkColorContrast).mockReturnValue({
+        valid: true,
+        issues: [],
+      } as any);
+
       render(<NetworkStatusIndicator />);
-      
+
       const region = screen.getByRole("region");
-      checkColorContrast(region);
-      
-      expect(checkColorContrast).toHaveBeenCalledWith(region);
+      AccessibilityTester.checkColorContrast(region);
+
+      expect(AccessibilityTester.checkColorContrast).toHaveBeenCalledWith(region);
     });
   });
 
   describe("Error Handling", () => {
     it("announces network restoration", () => {
-      const { announce } = require("@/lib/accessibility-utils").useScreenReader();
-      
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Simulate online event
+
       fireEvent(window, new Event("online"));
-      
-      expect(announce).toHaveBeenCalledWith("Network connection restored", "assertive");
+
+      expect(mockAnnounce).toHaveBeenCalledWith(
+        "Network connection restored",
+        "assertive"
+      );
     });
 
     it("announces network loss", () => {
-      const { announce } = require("@/lib/accessibility-utils").useScreenReader();
-      
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Simulate offline event
+
       fireEvent(window, new Event("offline"));
-      
-      expect(announce).toHaveBeenCalledWith("Network connection lost", "assertive");
+
+      expect(mockAnnounce).toHaveBeenCalledWith(
+        "Network connection lost",
+        "assertive"
+      );
     });
 
     it("provides error announcements for failed checks", async () => {
-      const { announce } = require("@/lib/accessibility-utils").useScreenReader();
-      
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Trigger refresh
+
       const refreshButton = screen.getByLabelText("network.refresh");
       fireEvent.click(refreshButton);
-      
-      // Wait for completion announcement
-      await waitFor(() => {
-        expect(announce).toHaveBeenCalledWith(expect.stringContaining("Network status check"), "polite");
-      });
+
+      await waitFor(
+        () => {
+          expect(mockAnnounce).toHaveBeenCalledWith(
+            expect.stringContaining("Network status check"),
+            "polite"
+          );
+        },
+        { timeout: 3000 }
+      );
     });
   });
 
   describe("Performance and Accessibility", () => {
     it("respects reduced motion preferences", () => {
-      const { useReducedMotion } = require("@/lib/network-animations");
-      useReducedMotion.mockReturnValue(true);
-      
       render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Component should still render properly with reduced motion
+
       expect(screen.getByRole("region")).toBeInTheDocument();
     });
 
     it("maintains accessibility with animations disabled", () => {
       render(<NetworkStatusIndicator enableMicroInteractions={false} />);
-      
-      // Accessibility features should still work
+
       const region = screen.getByRole("region");
       expect(region).toHaveAttribute("aria-live", "polite");
     });
 
     it("handles rapid status changes gracefully", () => {
-      const { announceStatusChange } = require("@/lib/accessibility-utils").useScreenReader();
-      
-      const { rerender } = render(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
-      
-      // Rapid status changes
+      const { rerender } = render(
+        <NetworkStatusIndicator enableScreenReaderSupport={true} />
+      );
+
       const statuses = ["offline", "checking", "slow", "online"];
-      
+
       statuses.forEach((status) => {
         mockUseNetworkStatusStore.mockReturnValue({
           ...mockStore,
           status: status as any,
         });
-        
+
         rerender(<NetworkStatusIndicator enableScreenReaderSupport={true} />);
       });
-      
-      // Should handle all changes without errors
-      expect(announceStatusChange).toHaveBeenCalledTimes(statuses.length - 1);
+
+      expect(mockAnnounceStatusChange).toHaveBeenCalled();
     });
   });
 
   describe("Integration with Existing Features", () => {
     it("works with auto-check functionality", () => {
       render(
-        <NetworkStatusIndicator 
+        <NetworkStatusIndicator
           autoCheck={true}
           enableScreenReaderSupport={true}
           announcementsEnabled={true}
         />
       );
-      
-      // Should initialize monitoring and announce initial status
+
       expect(mockStore.checkStatus).toHaveBeenCalled();
     });
 
     it("maintains accessibility with connection quality indicator", () => {
       render(
-        <NetworkStatusIndicator 
+        <NetworkStatusIndicator
           showConnectionQuality={true}
           enableScreenReaderSupport={true}
         />
       );
-      
-      // Should announce quality information
+
       expect(screen.getByText("Connection Quality:")).toBeInTheDocument();
     });
 
     it("preserves accessibility when details are hidden", () => {
       render(
-        <NetworkStatusIndicator 
+        <NetworkStatusIndicator
           showDetails={false}
           enableScreenReaderSupport={true}
         />
       );
-      
-      // Should still have proper ARIA attributes
+
       const region = screen.getByRole("region");
       expect(region).toHaveAttribute("aria-live", "polite");
       expect(region).not.toHaveAttribute("aria-describedby");

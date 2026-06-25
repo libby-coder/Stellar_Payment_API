@@ -1,250 +1,327 @@
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { render, screen, fireEvent, act } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import "@testing-library/jest-dom/vitest";
 import React from "react";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import "@testing-library/jest-dom";
+import confetti from "canvas-confetti";
 import { PaymentSuccessAnimation } from "./PaymentSuccessAnimation";
-import { NextIntlClientProvider } from "next-intl";
 
-// Mock framer-motion
-jest.mock("framer-motion", () => ({
+vi.mock("next-intl", () => ({
+  useTranslations: () => (key: string) => key,
+}));
+
+vi.mock("canvas-confetti", () => ({
+  default: vi.fn(),
+}));
+
+// ── framer-motion mock ────────────────────────────────────────────────────────
+// Hoisted so useReducedMotion can be controlled per-test (#980)
+const { mockUseReducedMotion } = vi.hoisted(() => ({
+  mockUseReducedMotion: vi.fn(() => false as boolean | null),
+}));
+
+const MOTION_PROPS = [
+  "initial", "animate", "exit", "transition", "variants", "viewport",
+  "whileInView", "whileHover", "whileTap", "whileFocus", "whileDrag",
+  "layout", "layoutId", "custom", "drag", "dragConstraints",
+  "onAnimationStart", "onAnimationComplete", "onUpdate",
+];
+
+function mkMotion(tag: string) {
+  return React.forwardRef(function MotionStub({ children, ...props }: React.PropsWithChildren<Record<string, unknown>>, ref: React.Ref<unknown>) {
+    const domProps = { ...props };
+    MOTION_PROPS.forEach((k) => delete domProps[k]);
+    return React.createElement(tag, { ...domProps, ref }, children);
+  });
+}
+
+vi.mock("framer-motion", () => ({
   motion: {
-    div: ({ children, ...props }: any) => <div {...props}>{children}</div>,
-    button: ({ children, ...props }: any) => <button {...props}>{children}</button>,
+    div: mkMotion("div"),
+    button: mkMotion("button"),
+    h1: mkMotion("h1"),
+    p: mkMotion("p"),
+    path: mkMotion("path"),
   },
-  AnimatePresence: ({ children }: any) => <>{children}</>,
+  AnimatePresence: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
+  useReducedMotion: mockUseReducedMotion,
 }));
 
-// Mock canvas-confetti
-jest.mock("canvas-confetti", () => jest.fn());
-
-// Mock next-intl
-jest.mock("next-intl", () => ({
-  useTranslations: () => (key: string) => {
-    const translations: Record<string, string> = {
-      "payment.successAnnounce": "Payment successful! {amount} {asset} has been received.",
-      "common.close": "Close",
-      "payment.amountReceived": "Amount Received",
-      "payment.successMessage": "Your payment has been processed successfully.",
-      "payment.transactionId": "Transaction ID",
-      "common.continue": "Continue",
-      "payment.successHint": "Press the continue button or close button to dismiss this success message.",
-    };
-    return translations[key] || key;
-  },
-}));
+// ─────────────────────────────────────────────────────────────────────────────
 
 describe("PaymentSuccessAnimation", () => {
-  const defaultProps = {
-    show: true,
-    onComplete: jest.fn(),
-    amount: "100",
-    asset: "XLM",
-    txId: "tx123",
-  };
-
-  const renderComponent = (props = {}) => {
-    const messages = {
-      "payment.successAnnounce": "Payment successful! {amount} {asset} has been received.",
-      "common.close": "Close",
-      "payment.amountReceived": "Amount Received",
-      "payment.successMessage": "Your payment has been processed successfully.",
-      "payment.transactionId": "Transaction ID",
-      "common.continue": "Continue",
-      "payment.successHint": "Press the continue button or close button to dismiss this success message.",
-    };
-
-    return render(
-      <NextIntlClientProvider messages={messages} locale="en">
-        <PaymentSuccessAnimation {...defaultProps} {...props} />
-      </NextIntlClientProvider>
-    );
-  };
-
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    mockUseReducedMotion.mockReturnValue(false);
   });
 
-  describe("Rendering", () => {
-    it("renders nothing when show is false", () => {
-      renderComponent({ show: false });
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    });
+  // ── Render / visibility ────────────────────────────────────────────────────
 
-    it("renders success animation when show is true", () => {
-      renderComponent();
-      expect(screen.getByRole("dialog")).toBeInTheDocument();
-      expect(screen.getByText("Payment Successful!")).toBeInTheDocument();
-      expect(screen.getByText("100 XLM")).toBeInTheDocument();
-    });
-
-    it("displays correct amount and asset", () => {
-      renderComponent({ amount: "500", asset: "USD" });
-      expect(screen.getByText("500 USD")).toBeInTheDocument();
-    });
-
-    it("displays transaction ID when provided", () => {
-      renderComponent();
-      expect(screen.getByText("tx123")).toBeInTheDocument();
-    });
-
-    it("does not display transaction ID when not provided", () => {
-      renderComponent({ txId: undefined });
-      expect(screen.queryByText("Transaction ID")).not.toBeInTheDocument();
-    });
+  it("renders nothing when show is false", () => {
+    render(<PaymentSuccessAnimation show={false} />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  describe("Accessibility", () => {
-    it("has correct ARIA attributes", () => {
-      renderComponent();
-      const dialog = screen.getByRole("dialog");
-      expect(dialog).toHaveAttribute("aria-modal", "true");
-      expect(dialog).toHaveAttribute("aria-labelledby", "payment-success-title");
-      expect(dialog).toHaveAttribute("aria-describedby", "payment-success-description");
-    });
+  it("renders dialog content when show is true", () => {
+    render(<PaymentSuccessAnimation show amount="100" asset="XLM" txId="tx123" />);
 
-    it("has screen reader announcement", () => {
-      renderComponent();
-      const announcement = screen.getByRole("status");
-      expect(announcement).toHaveAttribute("aria-live", "assertive");
-      expect(announcement).toHaveAttribute("aria-atomic", "true");
-      expect(announcement).toHaveTextContent("Payment successful! 100 XLM has been received.");
-    });
-
-    it("has accessible close button", () => {
-      renderComponent();
-      const closeButton = screen.getByLabelText("Close");
-      expect(closeButton).toBeInTheDocument();
-    });
-
-    it("has accessible continue button", () => {
-      renderComponent();
-      const continueButton = screen.getByLabelText("Continue");
-      expect(continueButton).toBeInTheDocument();
-    });
-
-    it("has screen reader hint", () => {
-      renderComponent();
-      const hint = screen.getByText("Press the continue button or close button to dismiss this success message.");
-      expect(hint).toHaveClass("sr-only");
-    });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText("payment.successTitle")).toBeInTheDocument();
+    expect(screen.getByText("100 XLM")).toBeInTheDocument();
+    expect(screen.getByText("tx123")).toBeInTheDocument();
   });
 
-  describe("Interactions", () => {
-    it("calls onComplete when close button is clicked", () => {
-      renderComponent();
-      const closeButton = screen.getByLabelText("Close");
-      fireEvent.click(closeButton);
-      expect(defaultProps.onComplete).toHaveBeenCalledTimes(1);
-    });
-
-    it("calls onComplete when continue button is clicked", () => {
-      renderComponent();
-      const continueButton = screen.getByLabelText("Continue");
-      fireEvent.click(continueButton);
-      expect(defaultProps.onComplete).toHaveBeenCalledTimes(1);
-    });
-
-    it("calls onComplete after animation timeout", async () => {
-      renderComponent();
-      await waitFor(() => {
-        expect(defaultProps.onComplete).toHaveBeenCalledTimes(1);
-      }, { timeout: 4100 });
-    });
+  it("omits transaction ID block when txId is not provided", () => {
+    render(<PaymentSuccessAnimation show amount="5" asset="USDC" />);
+    expect(screen.queryByText("payment.transactionId")).not.toBeInTheDocument();
   });
 
-  describe("Confetti Animation", () => {
-    it("triggers confetti on mount when show is true", () => {
-      const mockConfetti = require("canvas-confetti");
-      renderComponent();
-      expect(mockConfetti).toHaveBeenCalled();
-    });
-
-    it("does not trigger confetti when show is false", () => {
-      const mockConfetti = require("canvas-confetti");
-      renderComponent({ show: false });
-      expect(mockConfetti).not.toHaveBeenCalled();
-    });
-
-    it("does not trigger confetti again on re-render", () => {
-      const mockConfetti = require("canvas-confetti");
-      const { rerender } = renderComponent();
-      rerender(
-        <NextIntlClientProvider messages={{}} locale="en">
-          <PaymentSuccessAnimation {...defaultProps} show={true} />
-        </NextIntlClientProvider>
-      );
-      expect(mockConfetti).toHaveBeenCalledTimes(1);
-    });
+  it("uses default amount and asset when not provided", () => {
+    render(<PaymentSuccessAnimation show />);
+    expect(screen.getByText("0 XLM")).toBeInTheDocument();
   });
 
-  describe("Animation States", () => {
-    it("resets announcement state after timeout", async () => {
-      renderComponent();
-      // First render should set hasAnnounced to true
-      await waitFor(() => {
-        expect(screen.getByRole("status")).toBeInTheDocument();
-      });
+  // ── Optimistic updates (#981) ──────────────────────────────────────────────
 
-      // Wait for reset timeout
-      await new Promise(resolve => setTimeout(resolve, 1100));
-
-      // Re-render to check if it would announce again
-      const { rerender } = render(
-        <NextIntlClientProvider messages={{}} locale="en">
-          <PaymentSuccessAnimation {...defaultProps} show={false} />
-        </NextIntlClientProvider>
-      );
-
-      rerender(
-        <NextIntlClientProvider messages={{}} locale="en">
-          <PaymentSuccessAnimation {...defaultProps} show={true} />
-        </NextIntlClientProvider>
-      );
-
-      // Should announce again after reset
-      expect(screen.getByRole("status")).toBeInTheDocument();
-    });
+  it("shows optimistic badge when isOptimistic is true", () => {
+    render(<PaymentSuccessAnimation show isOptimistic amount="50" asset="XLM" />);
+    expect(screen.getByText("payment.optimisticNote")).toBeInTheDocument();
   });
 
-  describe("Props Handling", () => {
-    it("uses default values for optional props", () => {
-      renderComponent({
-        show: true,
-        onComplete: jest.fn(),
-        amount: undefined,
-        asset: undefined,
-        txId: undefined,
-      });
-      expect(screen.getByText("0 XLM")).toBeInTheDocument();
-    });
-
-    it("handles custom onComplete callback", () => {
-      const customOnComplete = jest.fn();
-      renderComponent({ onComplete: customOnComplete });
-
-      const continueButton = screen.getByLabelText("Continue");
-      fireEvent.click(continueButton);
-
-      expect(customOnComplete).toHaveBeenCalledTimes(1);
-    });
+  it("does not show optimistic badge when isOptimistic is false", () => {
+    render(<PaymentSuccessAnimation show isOptimistic={false} amount="50" asset="XLM" />);
+    expect(screen.queryByText("payment.optimisticNote")).not.toBeInTheDocument();
   });
 
-  describe("Translation Integration", () => {
-    it("uses translated text for UI elements", () => {
-      renderComponent();
-      expect(screen.getByText("Amount Received")).toBeInTheDocument();
-      expect(screen.getByText("Your payment has been processed successfully.")).toBeInTheDocument();
-    });
+  it("optimistic badge has role=status with aria-live=polite", () => {
+    render(<PaymentSuccessAnimation show isOptimistic />);
+    const badge = screen.getByText("payment.optimisticNote").closest("[role='status']");
+    expect(badge).toHaveAttribute("aria-live", "polite");
+  });
 
-    it("falls back to keys when translations are missing", () => {
-      const messages = {};
-      const { rerender } = render(
-        <NextIntlClientProvider messages={messages} locale="en">
-          <PaymentSuccessAnimation {...defaultProps} />
-        </NextIntlClientProvider>
-      );
+  it("continue button is disabled during optimistic dismiss", async () => {
+    let resolveOnComplete!: () => void;
+    const onComplete = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => { resolveOnComplete = resolve; })
+    );
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
 
-      // Should still render with fallback keys
-      expect(screen.getByRole("dialog")).toBeInTheDocument();
-    });
+    await userEvent.click(screen.getByLabelText("common.continue"));
+
+    expect(screen.getByLabelText("common.continue")).toBeDisabled();
+    expect(screen.getByLabelText("common.continue")).toHaveAttribute("aria-busy", "true");
+
+    act(() => resolveOnComplete());
+  });
+
+  it("close button is disabled during optimistic dismiss", async () => {
+    let resolveOnComplete!: () => void;
+    const onComplete = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => { resolveOnComplete = resolve; })
+    );
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+
+    await userEvent.click(screen.getByLabelText("common.close"));
+
+    expect(screen.getByLabelText("common.close")).toBeDisabled();
+    expect(screen.getByLabelText("common.close")).toHaveAttribute("aria-busy", "true");
+
+    act(() => resolveOnComplete());
+  });
+
+  it("shows spinner on continue button during dismiss", async () => {
+    let resolveOnComplete!: () => void;
+    const onComplete = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => { resolveOnComplete = resolve; })
+    );
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+
+    await userEvent.click(screen.getByLabelText("common.continue"));
+
+    expect(screen.getByTestId("dismiss-spinner")).toBeInTheDocument();
+
+    act(() => resolveOnComplete());
+  });
+
+  it("rolls back dismiss state and re-enables buttons when onComplete throws", async () => {
+    const onComplete = vi.fn().mockRejectedValue(new Error("Network error"));
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+
+    await userEvent.click(screen.getByLabelText("common.continue"));
+
+    expect(screen.getByLabelText("common.continue")).not.toBeDisabled();
+    expect(screen.getByLabelText("common.continue")).not.toHaveAttribute("aria-busy", "true");
+  });
+
+  it("prevents double-dismiss while already dismissing", async () => {
+    let resolveOnComplete!: () => void;
+    const onComplete = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => { resolveOnComplete = resolve; })
+    );
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+
+    await userEvent.click(screen.getByLabelText("common.continue"));
+
+    // onComplete should have been called exactly once; button is now disabled
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText("common.continue")).toBeDisabled();
+
+    act(() => resolveOnComplete());
+  });
+
+  // ── Confetti ───────────────────────────────────────────────────────────────
+
+  it("triggers confetti once on show", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<PaymentSuccessAnimation show amount="1" asset="XLM" />);
+    expect(confetti).toHaveBeenCalledTimes(1);
+    rerender(<PaymentSuccessAnimation show amount="1" asset="XLM" />);
+    expect(confetti).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("fires flanking confetti burst 200ms after initial burst", () => {
+    vi.useFakeTimers();
+    render(<PaymentSuccessAnimation show />);
+    expect(confetti).toHaveBeenCalledTimes(1);
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(confetti).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
+
+  it("resets confetti guard when show toggles off then on", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<PaymentSuccessAnimation show />);
+    expect(confetti).toHaveBeenCalledTimes(1);
+    rerender(<PaymentSuccessAnimation show={false} />);
+    rerender(<PaymentSuccessAnimation show />);
+    expect(confetti).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("skips confetti when prefersReducedMotion is true (#980)", () => {
+    mockUseReducedMotion.mockReturnValue(true);
+    vi.useFakeTimers();
+    render(<PaymentSuccessAnimation show />);
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(confetti).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  // ── onComplete callbacks ───────────────────────────────────────────────────
+
+  it("calls onComplete when close button is clicked", async () => {
+    const onComplete = vi.fn();
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+    await userEvent.click(screen.getByLabelText("common.close"));
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onComplete when continue button is clicked", async () => {
+    const onComplete = vi.fn();
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+    await userEvent.click(screen.getByLabelText("common.continue"));
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onComplete after 4-second auto-dismiss timeout", () => {
+    const onComplete = vi.fn();
+    vi.useFakeTimers();
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+    expect(onComplete).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(4000); });
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("does not call onComplete before 4 seconds elapse", () => {
+    const onComplete = vi.fn();
+    vi.useFakeTimers();
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+    act(() => { vi.advanceTimersByTime(3999); });
+    expect(onComplete).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  // ── Keyboard / focus ───────────────────────────────────────────────────────
+
+  it("dismisses via Escape key", async () => {
+    const onComplete = vi.fn();
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call onComplete on unrelated key presses", () => {
+    const onComplete = vi.fn();
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+    fireEvent.keyDown(document, { key: "Enter" });
+    fireEvent.keyDown(document, { key: " " });
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  // ── Screen reader / accessibility (#980) ──────────────────────────────────
+
+  it("has expected dialog ARIA semantics", () => {
+    render(<PaymentSuccessAnimation show amount="20" asset="USDC" />);
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveAttribute("aria-labelledby", "payment-success-title");
+    expect(dialog).toHaveAttribute("aria-describedby", "payment-success-description");
+  });
+
+  it("renders an assertive live region with the success announcement", () => {
+    render(<PaymentSuccessAnimation show amount="20" asset="USDC" />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "assertive");
+    expect(status).toHaveAttribute("aria-atomic", "true");
+    expect(status).toHaveTextContent("payment.successAnnounce");
+  });
+
+  it("renders dynamic announcement region with data-testid", () => {
+    render(<PaymentSuccessAnimation show />);
+    expect(screen.getByTestId("sr-announcement")).toBeInTheDocument();
+  });
+
+  it("announces network confirmation when isOptimistic changes from true to false", () => {
+    const { rerender } = render(<PaymentSuccessAnimation show isOptimistic />);
+    rerender(<PaymentSuccessAnimation show isOptimistic={false} />);
+    expect(screen.getByTestId("sr-announcement")).toHaveTextContent("payment.networkConfirmed");
+  });
+
+  it("announces error in live region when onComplete throws", async () => {
+    const onComplete = vi.fn().mockRejectedValue(new Error("Stellar network error"));
+    render(<PaymentSuccessAnimation show onComplete={onComplete} />);
+
+    await userEvent.click(screen.getByLabelText("common.continue"));
+
+    expect(screen.getByTestId("sr-announcement")).toHaveTextContent("Stellar network error");
+  });
+
+  it("close button has a descriptive accessible label", () => {
+    render(<PaymentSuccessAnimation show />);
+    expect(screen.getByLabelText("common.close")).toBeInTheDocument();
+  });
+
+  it("continue button has a descriptive accessible label", () => {
+    render(<PaymentSuccessAnimation show />);
+    expect(screen.getByLabelText("common.continue")).toBeInTheDocument();
+  });
+
+  it("renders sr-only keyboard hint", () => {
+    render(<PaymentSuccessAnimation show />);
+    expect(screen.getByText("payment.successHint")).toBeInTheDocument();
+  });
+
+  it("heading has the correct id for aria-labelledby", () => {
+    render(<PaymentSuccessAnimation show />);
+    expect(document.getElementById("payment-success-title")).toBeInTheDocument();
+  });
+
+  it("description paragraph has the correct id for aria-describedby", () => {
+    render(<PaymentSuccessAnimation show />);
+    expect(document.getElementById("payment-success-description")).toBeInTheDocument();
   });
 });

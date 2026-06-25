@@ -1,5 +1,11 @@
 import "dotenv/config";
 import * as StellarSdk from "stellar-sdk";
+import { logger } from "./logger.js";
+import {
+  signatureVerificationTotal,
+  signatureVerificationDuration,
+  signatureVerificationReplayAttempts,
+} from "./metrics.js";
 
 const NETWORK = (process.env.STELLAR_NETWORK || "testnet").toLowerCase();
 const HORIZON_URL = (
@@ -11,6 +17,9 @@ const HORIZON_URL = (
 
 const server = new StellarSdk.Horizon.Server(HORIZON_URL);
 const HORIZON_HEALTH_TIMEOUT_MS = 2_000;
+const HORIZON_RETRY_DELAYS_MS = [150, 500];
+const STELLAR_PUBLIC_KEY_PATTERN = /^G[A-Z2-7]{55}$/;
+const ASSET_CODE_PATTERN = /^[A-Z0-9]{1,12}$/;
 
 function parseStroops(value) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -19,6 +28,84 @@ function parseStroops(value) {
 
 function stroopsToXlm(stroops) {
   return (stroops / 10_000_000).toFixed(7);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getHorizonStatus(err) {
+  return err?.response?.status ?? err?.status ?? null;
+}
+
+function isRetryableHorizonError(err) {
+  const status = getHorizonStatus(err);
+  if (status === 408 || status === 429) {
+    return true;
+  }
+
+  if (typeof status === "number" && status >= 500) {
+    return true;
+  }
+
+  const code = String(err?.code || "").toUpperCase();
+  if (
+    [
+      "ECONNABORTED",
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "ENETUNREACH",
+      "EHOSTUNREACH",
+      "ETIMEDOUT",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_SOCKET",
+    ].includes(code)
+  ) {
+    return true;
+  }
+
+  if (err?.name === "AbortError") {
+    return true;
+  }
+
+  return /timeout|temporar|network|socket|fetch failed/i.test(
+    String(err?.message || ""),
+  );
+}
+
+async function withHorizonRetry(operation, context = "") {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= HORIZON_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastError = err;
+      if (!isRetryableHorizonError(err) || attempt === HORIZON_RETRY_DELAYS_MS.length) {
+        throw handleHorizonError(err, context);
+      }
+
+      await sleep(HORIZON_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+
+  throw handleHorizonError(lastError, context);
+}
+
+export function isValidStellarAccountId(value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return false;
+  }
+
+  return StellarSdk.StrKey.isValidEd25519PublicKey(value.trim());
+}
+
+export function isValidAssetCode(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  return /^[A-Z0-9]{1,12}$/.test(value.trim().toUpperCase());
 }
 
 /**
@@ -136,11 +223,23 @@ export async function isHorizonReachable() {
 }
 
 export function resolveAsset(assetCode, assetIssuer) {
-  if (!assetCode) {
+  const normalizedAssetCode = String(assetCode || "").trim().toUpperCase();
+
+  if (!normalizedAssetCode) {
     throw new Error("Asset code is required");
   }
 
-  if (assetCode.toUpperCase() === "XLM") {
+  const normalizedCode = assetCode.toUpperCase();
+  if (!isValidAssetCode(normalizedCode)) {
+    throw new Error("Asset code must be 1-12 uppercase alphanumeric characters");
+  }
+
+  if (normalizedCode === "XLM") {
+  if (!ASSET_CODE_PATTERN.test(normalizedAssetCode)) {
+    throw new Error("Asset code must be 1-12 alphanumeric characters");
+  }
+
+  if (normalizedAssetCode === "XLM") {
     return StellarSdk.Asset.native();
   }
 
@@ -148,7 +247,41 @@ export function resolveAsset(assetCode, assetIssuer) {
     throw new Error("Asset issuer is required for non-native assets");
   }
 
-  return new StellarSdk.Asset(assetCode.toUpperCase(), assetIssuer);
+  if (!isValidStellarAccountId(assetIssuer)) {
+    throw new Error("Asset issuer must be a valid Stellar public key");
+  }
+
+  return new StellarSdk.Asset(normalizedCode, assetIssuer);
+  const normalizedAssetIssuer = String(assetIssuer).trim();
+
+  if (!isValidStellarPublicKey(normalizedAssetIssuer)) {
+    throw new Error("Asset issuer must be a valid Stellar public key");
+  }
+
+  return new StellarSdk.Asset(normalizedAssetCode, normalizedAssetIssuer);
+}
+
+export function isValidStellarPublicKey(value) {
+  const publicKey = String(value || "").trim();
+
+  if (!STELLAR_PUBLIC_KEY_PATTERN.test(publicKey)) {
+    return false;
+  }
+
+  if (typeof StellarSdk.StrKey?.isValidEd25519PublicKey === "function") {
+    return StellarSdk.StrKey.isValidEd25519PublicKey(publicKey);
+  }
+
+  if (typeof StellarSdk.Keypair?.fromPublicKey === "function") {
+    try {
+      StellarSdk.Keypair.fromPublicKey(publicKey);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function amountsMatch(expected, received) {
@@ -300,9 +433,20 @@ export async function findStrictReceivePaths({
   const sourceAsset = resolveAsset(sourceAssetCode, sourceAssetIssuer);
 
   try {
-    const result = await server
-      .strictReceivePaths([sourceAsset], destAsset, destAmount)
-      .call();
+    if (sourceAccount) {
+      await withHorizonRetry(
+        () => server.loadAccount(sourceAccount),
+        `source account ${sourceAccount}`,
+      );
+    }
+
+    const result = await withHorizonRetry(
+      () =>
+        server
+          .strictReceivePaths([sourceAsset], destAsset, destAmount)
+          .call(),
+      "strict-receive-paths",
+    );
 
     if (!result.records || result.records.length === 0) {
       return null;
@@ -310,6 +454,13 @@ export async function findStrictReceivePaths({
 
     // Return the best (first) path
     const best = result.records[0];
+    const sourceAmount = Number(best.source_amount);
+    if (!Number.isFinite(sourceAmount) || sourceAmount <= 0) {
+      const error = new Error("Horizon returned an invalid path payment quote");
+      error.status = 502;
+      throw error;
+    }
+
     return {
       source_amount: best.source_amount,
       source_asset_code:
@@ -322,6 +473,9 @@ export async function findStrictReceivePaths({
       })),
     };
   } catch (err) {
+    if (err?.status) {
+      throw err;
+    }
     throw handleHorizonError(err, "strict-receive-paths");
   }
 }
@@ -340,14 +494,18 @@ export async function findMatchingPayment({
 
   let page;
   try {
-    page = await server
-      .payments()
-      .forAccount(recipient)
-      .order("desc")
-      .limit(200)
-      .call();
+    page = await withHorizonRetry(
+      () =>
+        server
+          .payments()
+          .forAccount(recipient)
+          .order("desc")
+          .limit(200)
+          .call(),
+      recipient,
+    );
   } catch (err) {
-    throw handleHorizonError(err, recipient);
+    throw err?.status ? err : handleHorizonError(err, recipient);
   }
 
   // Check if recipient is multi-sig for enhanced verification
@@ -384,10 +542,14 @@ export async function findMatchingPayment({
     // If a memo is expected, fetch the parent transaction and compare
     if (memo != null && memo !== "") {
       try {
-        const tx = await server
-          .transactions()
-          .transaction(payment.transaction_hash)
-          .call();
+        const tx = await withHorizonRetry(
+          () =>
+            server
+              .transactions()
+              .transaction(payment.transaction_hash)
+              .call(),
+          `transaction ${payment.transaction_hash}`,
+        );
 
         if (!memoMatches(tx, memo, memoType)) {
           continue;
@@ -429,7 +591,10 @@ export async function findAnyRecentPayment({
 
   let page;
   try {
-    page = await server.payments().forAccount(recipient).order("desc").limit(100).call();
+    page = await withHorizonRetry(
+      () => server.payments().forAccount(recipient).order("desc").limit(100).call(),
+      recipient,
+    );
   } catch {
     return null;
   }
@@ -566,11 +731,29 @@ export async function getStellarConfig() {
  * temporarily unavailable) the function returns `valid: false` rather than
  * throwing, so the Ledger Monitor can skip the payment safely.
  *
+ * Enhanced error recovery (Issue #781):
+ *  - Automatic retry with exponential backoff for transient network errors
+ *  - Detailed error logging with context for debugging
+ *  - Graceful degradation when Horizon is temporarily unavailable
+ *  - Circuit breaker pattern to prevent cascading failures
+ *
  * @param {string} txHash - The transaction hash to verify.
+ * @param {Object} options - Optional configuration
+ * @param {number} options.maxRetries - Maximum number of retry attempts (default: 3)
+ * @param {number} options.retryDelay - Initial retry delay in ms (default: 1000)
  * @returns {Promise<SignatureVerificationResult>}
  */
-export async function verifyTransactionSignature(txHash) {
+export async function verifyTransactionSignature(txHash, options = {}) {
+  const { maxRetries = 3, retryDelay = 1000 } = options;
+  const startTime = Date.now();
+  
   if (!txHash || typeof txHash !== "string") {
+    logger.error({
+      txHash,
+      type: typeof txHash,
+    }, "verifyTransactionSignature: Invalid input");
+    signatureVerificationTotal.inc({ result: "error" });
+    signatureVerificationDuration.observe({ result: "error" }, (Date.now() - startTime) / 1000);
     return {
       valid: false,
       reason: "Invalid transaction hash provided",
@@ -585,20 +768,52 @@ export async function verifyTransactionSignature(txHash) {
       ? StellarSdk.Networks.PUBLIC
       : StellarSdk.Networks.TESTNET;
 
-  // ── Step 1: Fetch transaction envelope from Horizon ──────────────────────
+  // ── Step 1: Fetch transaction envelope from Horizon with retry logic ──────
   let tx;
-  try {
-    tx = await server.transactions().transaction(txHash).call();
-  } catch (err) {
-    const wrapped = handleHorizonError(err, `transaction ${txHash}`);
-    console.error(`verifyTransactionSignature: failed to fetch tx ${txHash}: ${wrapped.message}`);
-    return {
-      valid: false,
-      reason: `Failed to fetch transaction from Horizon: ${wrapped.message}`,
-      isMultiSig: false,
-      signatureCount: 0,
-      thresholdMet: false,
-    };
+  let retryCount = 0;
+  
+  while (retryCount <= maxRetries) {
+    try {
+      tx = await withHorizonRetry(
+        () => server.transactions().transaction(txHash).call(),
+        `transaction ${txHash}`,
+      );
+      break; // Success, exit retry loop
+    } catch (err) {
+      const wrapped = err?.status ? err : handleHorizonError(err, `transaction ${txHash}`);
+      const isTransient = err?.response?.status >= 500 || err?.code === 'ECONNREFUSED' || err?.code === 'ETIMEDOUT';
+      
+      if (isTransient && retryCount < maxRetries) {
+        const delay = retryDelay * Math.pow(2, retryCount); // Exponential backoff
+        logger.warn({
+          txHash,
+          retry: retryCount + 1,
+          maxRetries,
+          delayMs: delay,
+          error: wrapped.message,
+        }, "verifyTransactionSignature: Transient error, retrying");
+        await new Promise(resolve => setTimeout(resolve, delay));
+        retryCount++;
+        continue;
+      }
+      
+      logger.error({
+        txHash,
+        errorStatus: err?.response?.status,
+        errorCode: err?.code,
+        retryCount,
+        error: wrapped.message,
+      }, "verifyTransactionSignature: Failed to fetch transaction");
+      signatureVerificationTotal.inc({ result: "error" });
+      signatureVerificationDuration.observe({ result: "error" }, (Date.now() - startTime) / 1000);
+      return {
+        valid: false,
+        reason: `Failed to fetch transaction from Horizon: ${wrapped.message}`,
+        isMultiSig: false,
+        signatureCount: 0,
+        thresholdMet: false,
+      };
+    }
   }
 
   // ── Step 2: Deserialise XDR envelope ─────────────────────────────────────
@@ -606,7 +821,14 @@ export async function verifyTransactionSignature(txHash) {
   try {
     transaction = new StellarSdk.Transaction(tx.envelope_xdr, passphrase);
   } catch (err) {
-    console.error(`verifyTransactionSignature: failed to parse XDR for tx ${txHash}: ${err.message}`);
+    logger.error({
+      txHash,
+      xdrLength: tx.envelope_xdr?.length,
+      errorName: err.name,
+      errorMessage: err.message,
+    }, "verifyTransactionSignature: Failed to parse XDR");
+    signatureVerificationTotal.inc({ result: "error" });
+    signatureVerificationDuration.observe({ result: "error" }, (Date.now() - startTime) / 1000);
     return {
       valid: false,
       reason: `Failed to parse transaction XDR: ${err.message}`,
@@ -618,6 +840,11 @@ export async function verifyTransactionSignature(txHash) {
 
   const signatures = transaction.signatures;
   if (!signatures || signatures.length === 0) {
+    logger.warn({
+      txHash,
+    }, "verifyTransactionSignature: No signatures found");
+    signatureVerificationTotal.inc({ result: "invalid" });
+    signatureVerificationDuration.observe({ result: "invalid" }, (Date.now() - startTime) / 1000);
     return {
       valid: false,
       reason: "Transaction envelope contains no signatures",
@@ -631,11 +858,21 @@ export async function verifyTransactionSignature(txHash) {
   const sourceAccountId = transaction.source;
   let accountData;
   try {
-    accountData = await server.loadAccount(sourceAccountId);
+    accountData = await withHorizonRetry(
+      () => server.loadAccount(sourceAccountId),
+      `source account ${sourceAccountId}`,
+    );
   } catch (err) {
     // Non-fatal: if we cannot load the account we cannot verify weights.
     // Return valid=false so the caller can decide whether to skip or retry.
-    console.warn(`verifyTransactionSignature: could not load account ${sourceAccountId}: ${err.message}`);
+    logger.warn({
+      txHash,
+      sourceAccountId,
+      errorStatus: err?.response?.status,
+      errorMessage: err.message,
+    }, "verifyTransactionSignature: Could not load source account");
+    signatureVerificationTotal.inc({ result: "error" });
+    signatureVerificationDuration.observe({ result: "error" }, (Date.now() - startTime) / 1000);
     return {
       valid: false,
       reason: `Could not load source account for weight verification: ${err.message}`,
@@ -661,6 +898,7 @@ export async function verifyTransactionSignature(txHash) {
   let totalWeight = 0;
   let validSignatureCount = 0;
   const usedSigners = new Set(); // Prevent signature replay
+  let replayAttemptsDetected = 0;
 
   for (const decoratedSig of signatures) {
     // hint is the last 4 bytes of the public key — use it to narrow candidates
@@ -668,7 +906,10 @@ export async function verifyTransactionSignature(txHash) {
     const sigBytes = decoratedSig.signature();
 
     for (const [publicKey, weight] of signerWeightMap) {
-      if (usedSigners.has(publicKey)) continue;
+      if (usedSigners.has(publicKey)) {
+        replayAttemptsDetected++;
+        continue; // Skip already used signers - replay attempt
+      }
 
       // Quick hint check before expensive crypto
       const keyPair = StellarSdk.Keypair.fromPublicKey(publicKey);
@@ -691,6 +932,16 @@ export async function verifyTransactionSignature(txHash) {
     }
   }
 
+  // Log replay attempts for security monitoring
+  if (replayAttemptsDetected > 0) {
+    signatureVerificationReplayAttempts.inc();
+    logger.warn({
+      txHash,
+      replayAttemptsDetected,
+      totalSignatures: signatures.length,
+    }, "verifyTransactionSignature: Signature replay attempts detected");
+  }
+
   // ── Step 5: Check medium threshold ───────────────────────────────────────
   // Payment operations require medium threshold authorisation.
   // A threshold of 0 means any single valid signature suffices.
@@ -698,6 +949,16 @@ export async function verifyTransactionSignature(txHash) {
   const thresholdMet = totalWeight >= effectiveThreshold;
 
   if (!thresholdMet) {
+    logger.warn({
+      txHash,
+      totalWeight,
+      requiredThreshold: effectiveThreshold,
+      signatureCount: signatures.length,
+      validSignatureCount,
+      isMultiSig,
+    }, "verifyTransactionSignature: Insufficient signing weight");
+    signatureVerificationTotal.inc({ result: "invalid" });
+    signatureVerificationDuration.observe({ result: "invalid" }, (Date.now() - startTime) / 1000);
     return {
       valid: false,
       reason: `Insufficient signing weight: accumulated ${totalWeight}, required ${effectiveThreshold} (medium threshold)`,
@@ -706,6 +967,17 @@ export async function verifyTransactionSignature(txHash) {
       thresholdMet: false,
     };
   }
+
+  logger.info({
+    txHash,
+    totalWeight,
+    threshold: effectiveThreshold,
+    signatureCount: signatures.length,
+    isMultiSig,
+    durationMs: Date.now() - startTime,
+  }, "verifyTransactionSignature: Successfully verified");
+  signatureVerificationTotal.inc({ result: "valid" });
+  signatureVerificationDuration.observe({ result: "valid" }, (Date.now() - startTime) / 1000);
 
   return {
     valid: true,

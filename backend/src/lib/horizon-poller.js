@@ -12,6 +12,8 @@
  * ───────────────────────────
  * The poller is designed to be resilient against transient failures:
  *
+ *  • Horizon calls are rate-limited inside the monitor to avoid accidental
+ *    endpoint abuse during large pending-payment batches.
  *  • Per-payment errors are isolated — one bad payment never aborts the cycle.
  *  • Horizon connectivity failures trigger exponential back-off so the poller
  *    does not hammer an unavailable endpoint.
@@ -20,6 +22,7 @@
  *    before resuming normal operation.
  *  • Signature verification failures are logged with full context and the
  *    payment is skipped (not failed) so it can be re-checked next cycle.
+ *  • Wrong-amount transactions are signature-verified before status changes.
  *  • DB update conflicts (unique constraint on tx_id) are handled gracefully.
  *  • All error paths emit structured log entries for observability.
  */
@@ -40,6 +43,9 @@ import { logger } from "./logger.js";
 import {
   paymentConfirmedCounter,
   paymentConfirmationLatency,
+  ledgerMonitorCycleDuration,
+  ledgerMonitorPaymentsChecked,
+  ledgerMonitorCircuitBreakerTrips,
 } from "./metrics.js";
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
@@ -47,6 +53,11 @@ import {
 const POLL_INTERVAL_MS = 15_000;       // 15 seconds between normal cycles
 const BATCH_SIZE = 50;                 // max pending payments per cycle
 const MAX_AGE_HOURS = 24;             // ignore payments older than 24 h (likely abandoned)
+const HORIZON_REQUESTS_PER_SECOND = parsePositiveInt(
+  process.env.LEDGER_MONITOR_HORIZON_RPS,
+  5,
+);
+const TRANSIENT_DB_RETRY_ATTEMPTS = 2;
 const MERCHANT_NOTIFICATION_FIELDS = [
   "webhook_secret",
   "webhook_version",
@@ -83,6 +94,9 @@ let _circuitBreakerOpenAt = 0;
 
 /** Current back-off delay index into BACKOFF_DELAYS_MS. */
 let _backoffIndex = 0;
+let _rateLimiter = createLedgerMonitorRateLimiter({
+  maxPerSecond: HORIZON_REQUESTS_PER_SECOND,
+});
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -112,6 +126,7 @@ export function getPollerHealth() {
     consecutiveFailures: _consecutiveFailures,
     circuitBreakerOpen,
     backoffIndex: _backoffIndex,
+    horizonRequestsPerSecond: _rateLimiter.maxPerSecond,
   };
 }
 
@@ -122,6 +137,7 @@ export function resetPollerState() {
   _consecutiveFailures = 0;
   _circuitBreakerOpenAt = 0;
   _backoffIndex = 0;
+  _rateLimiter.reset();
 }
 
 /**
@@ -132,11 +148,60 @@ export async function pollOnce() {
   return pollPendingPayments();
 }
 
+export function createLedgerMonitorRateLimiter({
+  maxPerSecond,
+  burst = maxPerSecond,
+  now = () => Date.now(),
+  sleepFn = sleep,
+} = {}) {
+  const safeMax = Math.max(1, Number(maxPerSecond) || 1);
+  const safeBurst = Math.max(1, Number(burst) || safeMax);
+  let tokens = safeBurst;
+  let lastRefillAt = now();
+
+  function refill() {
+    const current = now();
+    const elapsedMs = Math.max(0, current - lastRefillAt);
+    tokens = Math.min(safeBurst, tokens + (elapsedMs / 1000) * safeMax);
+    lastRefillAt = current;
+  }
+
+  return {
+    maxPerSecond: safeMax,
+    async waitForSlot() {
+      refill();
+      if (tokens >= 1) {
+        tokens -= 1;
+        return;
+      }
+
+      const delayMs = Math.ceil(((1 - tokens) / safeMax) * 1000);
+      logger.warn(
+        { delayMs, maxPerSecond: safeMax },
+        "Horizon poller: rate limit reached — delaying Horizon request",
+      );
+      await sleepFn(delayMs);
+      refill();
+      tokens = Math.max(0, tokens - 1);
+    },
+    reset() {
+      tokens = safeBurst;
+      lastRefillAt = now();
+    },
+  };
+}
+
+export function setLedgerMonitorRateLimiterForTest(rateLimiter) {
+  _rateLimiter = rateLimiter;
+}
+
 // ── Core polling loop ─────────────────────────────────────────────────────────
 
 async function pollPendingPayments() {
   if (_running) return; // skip if previous cycle still running
   _running = true;
+
+  const cycleStartTime = Date.now();
 
   try {
     // ── Circuit breaker check ─────────────────────────────────────────────
@@ -158,14 +223,7 @@ async function pollPendingPayments() {
 
     const cutoff = new Date(Date.now() - MAX_AGE_HOURS * 60 * 60 * 1000).toISOString();
 
-    const { data: pending, error } = await supabase
-      .from("payments")
-      .select("id, amount, asset, asset_issuer, recipient, memo, memo_type, webhook_url, created_at, merchant_id, metadata")
-      .eq("status", "pending")
-      .is("deleted_at", null)
-      .gte("created_at", cutoff)
-      .order("created_at", { ascending: true })
-      .limit(BATCH_SIZE);
+    const { data: pending, error } = await fetchPendingPayments(cutoff);
 
     if (error) {
       _consecutiveFailures += 1;
@@ -183,6 +241,7 @@ async function pollPendingPayments() {
       // Trip circuit breaker after too many consecutive failures
       if (_consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         _circuitBreakerOpenAt = Date.now();
+        ledgerMonitorCircuitBreakerTrips.inc();
         logger.error(
           { consecutiveFailures: _consecutiveFailures, resetMs: CIRCUIT_BREAKER_RESET_MS },
           "Horizon poller: circuit breaker tripped — pausing polling",
@@ -216,24 +275,34 @@ async function pollPendingPayments() {
     }
 
     // Process each group sequentially, different groups in parallel
+    const merchantConfigCache = new Map();
     await Promise.allSettled(
       Array.from(groups.values()).map(async (group) => {
         for (const p of group) {
-          await checkPayment(p);
+          await checkPayment(p, { merchantConfigCache });
         }
       })
     );
 
+    // Record metrics for payment check results
+    results.forEach((result) => {
+      if (result.status === 'rejected') {
+        logger.warn({ err: result.reason }, "Horizon poller: payment group processing failed");
+      }
+    });
+
   } catch (err) {
     logger.warn({ err }, "Horizon poller: unexpected error in poll cycle");
   } finally {
+    const cycleDuration = (Date.now() - cycleStartTime) / 1000;
+    ledgerMonitorCycleDuration.observe(cycleDuration);
     _running = false;
   }
 }
 
 // ── Per-payment check ─────────────────────────────────────────────────────────
 
-async function checkPayment(payment) {
+async function checkPayment(payment, { merchantConfigCache = new Map() } = {}) {
   try {
     // Guard: skip if essential fields are missing
     if (!payment.asset || !payment.recipient) {
@@ -241,20 +310,24 @@ async function checkPayment(payment) {
         { paymentId: payment.id },
         "Horizon poller: skipping payment with missing asset or recipient",
       );
+      ledgerMonitorPaymentsChecked.inc({ result: "skipped" });
       return;
     }
 
     let match;
     try {
-      match = await findMatchingPayment({
-        recipient: payment.recipient,
-        amount: payment.amount,
-        assetCode: payment.asset,
-        assetIssuer: payment.asset_issuer,
-        memo: payment.memo,
-        memoType: payment.memo_type,
-        createdAt: payment.created_at,
-      });
+      match = await withLedgerMonitorRateLimit(
+        () => findMatchingPayment({
+          recipient: payment.recipient,
+          amount: payment.amount,
+          assetCode: payment.asset,
+          assetIssuer: payment.asset_issuer,
+          memo: payment.memo,
+          memoType: payment.memo_type,
+          createdAt: payment.created_at,
+        }),
+        { paymentId: payment.id, operation: "findMatchingPayment" },
+      );
     } catch (horizonErr) {
       // Horizon errors during payment lookup are transient — log and skip.
       // The payment will be retried on the next poll cycle.
@@ -262,47 +335,15 @@ async function checkPayment(payment) {
         { err: horizonErr, paymentId: payment.id },
         "Horizon poller: Horizon error during payment lookup — will retry next cycle",
       );
+      ledgerMonitorPaymentsChecked.inc({ result: "skipped" });
       return;
     }
 
     // ── Signature verification (Issue #630) ──────────────────────────────
     if (match) {
-      let sigResult;
-      try {
-        sigResult = await verifyTransactionSignature(match.transaction_hash);
-      } catch (sigErr) {
-        // Unexpected error from the verifier itself — treat as unverified
-        logger.warn(
-          { err: sigErr, paymentId: payment.id, txHash: match.transaction_hash },
-          "Horizon poller: unexpected error during signature verification — skipping payment",
-        );
+      if (!(await verifyLedgerTransactionSignature(match.transaction_hash, payment.id))) {
         return;
       }
-
-      if (!sigResult.valid) {
-        logger.warn(
-          {
-            paymentId: payment.id,
-            txHash: match.transaction_hash,
-            reason: sigResult.reason,
-            isMultiSig: sigResult.isMultiSig,
-            signatureCount: sigResult.signatureCount,
-            thresholdMet: sigResult.thresholdMet,
-          },
-          "Horizon poller: signature verification failed — skipping payment",
-        );
-        return;
-      }
-
-      logger.debug(
-        {
-          paymentId: payment.id,
-          txHash: match.transaction_hash,
-          isMultiSig: sigResult.isMultiSig,
-          signatureCount: sigResult.signatureCount,
-        },
-        "Horizon poller: signature verification passed",
-      );
     }
 
     if (!match) {
@@ -311,12 +352,15 @@ async function checkPayment(payment) {
       // Check for wrong-amount payment
       let anyPayment;
       try {
-        anyPayment = await findAnyRecentPayment({
-          recipient: payment.recipient,
-          assetCode: payment.asset,
-          assetIssuer: payment.asset_issuer,
-          createdAt: payment.created_at,
-        });
+        anyPayment = await withLedgerMonitorRateLimit(
+          () => findAnyRecentPayment({
+            recipient: payment.recipient,
+            assetCode: payment.asset,
+            assetIssuer: payment.asset_issuer,
+            createdAt: payment.created_at,
+          }),
+          { paymentId: payment.id, operation: "findAnyRecentPayment" },
+        );
       } catch (horizonErr) {
         logger.warn(
           { err: horizonErr, paymentId: payment.id },
@@ -326,30 +370,37 @@ async function checkPayment(payment) {
       }
 
       if (anyPayment) {
+        if (!(await verifyLedgerTransactionSignature(anyPayment.transaction_hash, payment.id))) {
+          return;
+        }
+
         const received = Number(anyPayment.received_amount);
         const expected = Number(payment.amount);
         const diff = received - expected;
 
         if (diff < -0.0000001) {
           // Underpayment — mark failed
-          await supabase.from("payments").update({
-            status: "failed",
-            tx_id: anyPayment.transaction_hash,
-            metadata: {
-              ...(payment.metadata || {}),
-              failure_reason: "underpayment",
-              expected_amount: expected,
-              received_amount: received,
-              shortfall: Number((expected - received).toFixed(7)),
-            },
-          }).eq("id", payment.id).eq("status", "pending");
+          await retryTransientDbOperation(
+            () => supabase.from("payments").update({
+              status: "failed",
+              tx_id: anyPayment.transaction_hash,
+              metadata: {
+                ...(payment.metadata || {}),
+                failure_reason: "underpayment",
+                expected_amount: expected,
+                received_amount: received,
+                shortfall: Number((expected - received).toFixed(7)),
+              },
+            }).eq("id", payment.id).eq("status", "pending"),
+            { paymentId: payment.id, operation: "markUnderpaymentFailed" },
+          );
 
-          const redis = await connectRedisClient();
-          await invalidatePaymentCache(redis, payment.id);
+          await safeInvalidatePaymentCache(payment.id);
           logger.info(
             { paymentId: payment.id, expected, received },
             "Horizon poller: underpayment detected — marked failed",
           );
+          ledgerMonitorPaymentsChecked.inc({ result: "failed" });
 
           streamManager.notify(payment.id, "payment.failed", {
             status: "failed",
@@ -368,27 +419,30 @@ async function checkPayment(payment) {
         } else if (diff > 0.0000001) {
           // Overpayment — confirm but flag
           const latencySeconds = (Date.now() - new Date(payment.created_at).getTime()) / 1000;
-          const { data: updated } = await supabase.from("payments").update({
-            status: "confirmed",
-            tx_id: anyPayment.transaction_hash,
-            completion_duration_seconds: Math.floor(latencySeconds),
-            metadata: {
-              ...(payment.metadata || {}),
-              overpayment: true,
-              expected_amount: expected,
-              received_amount: received,
-              excess: Number((received - expected).toFixed(7)),
-            },
-          }).eq("id", payment.id).eq("status", "pending").is("tx_id", null).select("id").maybeSingle();
+          const { data: updated } = await retryTransientDbOperation(
+            () => supabase.from("payments").update({
+              status: "confirmed",
+              tx_id: anyPayment.transaction_hash,
+              completion_duration_seconds: Math.floor(latencySeconds),
+              metadata: {
+                ...(payment.metadata || {}),
+                overpayment: true,
+                expected_amount: expected,
+                received_amount: received,
+                excess: Number((received - expected).toFixed(7)),
+              },
+            }).eq("id", payment.id).eq("status", "pending").is("tx_id", null).select("id").maybeSingle(),
+            { paymentId: payment.id, operation: "confirmOverpayment" },
+          );
 
           if (!updated) return; // already claimed
 
-          const redis = await connectRedisClient();
-          await invalidatePaymentCache(redis, payment.id);
+          await safeInvalidatePaymentCache(payment.id);
           logger.info(
             { paymentId: payment.id, expected, received },
             "Horizon poller: overpayment — confirmed with flag",
           );
+          ledgerMonitorPaymentsChecked.inc({ result: "confirmed" });
           streamManager.notify(payment.id, "payment.confirmed", {
             status: "confirmed",
             tx_id: anyPayment.transaction_hash,
@@ -427,18 +481,21 @@ async function checkPayment(payment) {
 
     // Atomic update: only succeeds if tx_id is still NULL (not claimed by another payment).
     // The unique index on tx_id provides the final database-level guarantee.
-    const { data: updated, error: updateError } = await supabase
-      .from("payments")
-      .update({
-        status: "confirmed",
-        tx_id: match.transaction_hash,
-        completion_duration_seconds: Math.floor(latencySeconds),
-      })
-      .eq("id", payment.id)
-      .eq("status", "pending")
-      .is("tx_id", null)   // ← only claim if not already taken
-      .select("id")
-      .maybeSingle();
+    const { data: updated, error: updateError } = await retryTransientDbOperation(
+      () => supabase
+        .from("payments")
+        .update({
+          status: "confirmed",
+          tx_id: match.transaction_hash,
+          completion_duration_seconds: Math.floor(latencySeconds),
+        })
+        .eq("id", payment.id)
+        .eq("status", "pending")
+        .is("tx_id", null)
+        .select("id")
+        .maybeSingle(),
+      { paymentId: payment.id, operation: "confirmPayment" },
+    );
 
     if (updateError) {
       // Unique constraint violation — another payment already claimed this tx
@@ -466,8 +523,7 @@ async function checkPayment(payment) {
     }
 
     // Invalidate Redis cache
-    const redis = await connectRedisClient();
-    await invalidatePaymentCache(redis, payment.id);
+    await safeInvalidatePaymentCache(payment.id);
 
     // Metrics
     paymentConfirmedCounter.inc({ asset: payment.asset });
@@ -477,6 +533,7 @@ async function checkPayment(payment) {
       { paymentId: payment.id, txHash: match.transaction_hash },
       "Horizon poller: payment confirmed",
     );
+    ledgerMonitorPaymentsChecked.inc({ result: "confirmed" });
 
     // SSE → customer checkout page
     streamManager.notify(payment.id, "payment.confirmed", {
@@ -498,7 +555,7 @@ async function checkPayment(payment) {
     }
 
     // Webhook
-    const merchant = await loadMerchantNotificationConfig(payment.merchant_id);
+    const merchant = await loadMerchantNotificationConfig(payment.merchant_id, merchantConfigCache);
     if (merchant) {
       const webhookPayload = getPayloadForVersion(
         merchant.webhook_version || "v1",
@@ -545,6 +602,7 @@ async function checkPayment(payment) {
   } catch (err) {
     // Non-fatal — log and continue with other payments
     logger.warn({ err, paymentId: payment.id }, "Horizon poller: error checking payment");
+    ledgerMonitorPaymentsChecked.inc({ result: "skipped" });
   }
 }
 
@@ -554,9 +612,129 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function loadMerchantNotificationConfig(merchantId) {
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+async function withLedgerMonitorRateLimit(operation, context) {
+  await _rateLimiter.waitForSlot();
+  try {
+    return await operation();
+  } catch (err) {
+    logger.warn(
+      { err, ...context },
+      "Horizon poller: rate-limited Horizon operation failed",
+    );
+    throw err;
+  }
+}
+
+async function verifyLedgerTransactionSignature(txHash, paymentId) {
+  let sigResult;
+  try {
+    sigResult = await withLedgerMonitorRateLimit(
+      () => verifyTransactionSignature(txHash),
+      { paymentId, txHash, operation: "verifyTransactionSignature" },
+    );
+  } catch (sigErr) {
+    logger.warn(
+      { err: sigErr, paymentId, txHash },
+      "Horizon poller: unexpected error during signature verification — skipping payment",
+    );
+    return false;
+  }
+
+  if (!sigResult?.valid) {
+    logger.warn(
+      {
+        paymentId,
+        txHash,
+        reason: sigResult?.reason ?? "Signature verifier returned no result",
+        isMultiSig: sigResult?.isMultiSig ?? false,
+        signatureCount: sigResult?.signatureCount ?? 0,
+        thresholdMet: sigResult?.thresholdMet ?? false,
+      },
+      "Horizon poller: signature verification failed — skipping payment",
+    );
+    return false;
+  }
+
+  logger.debug(
+    {
+      paymentId,
+      txHash,
+      isMultiSig: sigResult.isMultiSig,
+      signatureCount: sigResult.signatureCount,
+    },
+    "Horizon poller: signature verification passed",
+  );
+  return true;
+}
+
+async function fetchPendingPayments(cutoff) {
+  return supabase
+    .from("payments")
+    .select("id, amount, asset, asset_issuer, recipient, memo, memo_type, webhook_url, created_at, merchant_id, metadata")
+    .eq("status", "pending")
+    .is("deleted_at", null)
+    .is("tx_id", null)
+    .gte("created_at", cutoff)
+    .order("created_at", { ascending: true })
+    .limit(BATCH_SIZE);
+}
+
+async function retryTransientDbOperation(operation, context) {
+  let lastResult;
+  for (let attempt = 0; attempt <= TRANSIENT_DB_RETRY_ATTEMPTS; attempt += 1) {
+    lastResult = await operation();
+    if (!isTransientDbError(lastResult?.error)) {
+      return lastResult;
+    }
+
+    const delayMs = 100 * 2 ** attempt;
+    logger.warn(
+      { err: lastResult.error, attempt: attempt + 1, delayMs, ...context },
+      "Horizon poller: transient DB operation failed — retrying",
+    );
+    await sleep(delayMs);
+  }
+  return lastResult;
+}
+
+function isTransientDbError(error) {
+  if (!error) return false;
+  const code = String(error.code || "");
+  const message = String(error.message || "").toLowerCase();
+  return (
+    code.startsWith("08") ||
+    code === "40001" ||
+    code === "40P01" ||
+    message.includes("timeout") ||
+    message.includes("temporarily unavailable") ||
+    message.includes("connection")
+  );
+}
+
+async function safeInvalidatePaymentCache(paymentId) {
+  try {
+    const redis = await connectRedisClient();
+    await invalidatePaymentCache(redis, paymentId);
+  } catch (err) {
+    logger.warn(
+      { err, paymentId },
+      "Horizon poller: cache invalidation failed — continuing notifications",
+    );
+  }
+}
+
+async function loadMerchantNotificationConfig(merchantId, cache = new Map()) {
   if (!merchantId) {
     return null;
+  }
+
+  if (cache.has(merchantId)) {
+    return cache.get(merchantId);
   }
 
   const { data, error } = await supabase
@@ -570,8 +748,11 @@ async function loadMerchantNotificationConfig(merchantId) {
       { err: error, merchantId },
       "Horizon poller: failed to load merchant notification config",
     );
+    cache.set(merchantId, null);
     return null;
   }
 
-  return data ?? null;
+  const merchant = data ?? null;
+  cache.set(merchantId, merchant);
+  return merchant;
 }

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { supabase } from "../lib/supabase.js";
+import { queryWithRetry } from "../lib/db.js";
 import {
   findMatchingPayment,
   createRefundTransaction,
   findStrictReceivePaths,
+  isValidStellarPublicKey,
   verifyTransactionSignature,
 } from "../lib/stellar.js";
 import { resolveBrandingConfig } from "../lib/branding.js";
@@ -17,16 +18,28 @@ import {
   setCachedPayment,
   invalidatePaymentCache,
 } from "../lib/redis.js";
-import { ASSET_DEFAULTS } from "../constants/assetConstants.js";
+import { resolveAssetIssuer } from "../constants/assetConstants.js";
+import { AssetIssuerErrorRecovery } from "../lib/asset-issuer.js";
 import {
   paymentCreatedCounter,
   paymentConfirmedCounter,
   paymentConfirmationLatency,
   paymentFailedCounter,
 } from "../lib/metrics.js";
+import { paymentSignatureVerifier } from "../lib/payment-signature-verification.js";
+import { logger } from "../lib/logger.js";
+
+const SAFE_METADATA_KEY_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+let supabaseClientPromise;
 
 function applyPaymentFilters(query, filters) {
   const { status, asset, date_from: dateFrom, date_to: dateTo, search } = filters;
+  const {
+    created_after: createdAfter,
+    created_before: createdBefore,
+    client_id: clientId,
+    metadata,
+  } = filters;
 
   if (typeof status === "string" && status.length > 0) {
     query = query.eq("status", status);
@@ -44,18 +57,438 @@ function applyPaymentFilters(query, filters) {
     query = query.lte("created_at", `${dateTo}T23:59:59.999Z`);
   }
 
+  if (typeof createdAfter === "string" && createdAfter.length > 0) {
+    query = query.gte("created_at", createdAfter);
+  }
+
+  if (typeof createdBefore === "string" && createdBefore.length > 0) {
+    query = query.lte("created_at", createdBefore);
+  }
+
+  if (typeof clientId === "string" && clientId.trim().length > 0) {
+    query = query.eq("client_id", clientId.trim());
+  }
+
   if (typeof search === "string" && search.trim().length > 0) {
     const term = search.trim().replaceAll(",", "\\,");
-    query = query.or(
-      `id.ilike.%${term}%,description.ilike.%${term}%,recipient.ilike.%${term}%`
-    );
+    let orQuery = `id.ilike.%${term}%,description.ilike.%${term}%,recipient.ilike.%${term}%`;
+    const numericTerm = Number(term);
+    if (!Number.isNaN(numericTerm)) {
+      orQuery += `,amount.eq.${numericTerm}`;
+    }
+    query = query.or(orQuery);
+  }
+
+  if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+    for (const [key, value] of Object.entries(metadata)) {
+      if (!SAFE_METADATA_KEY_RE.test(key) || typeof value !== "string") {
+        continue;
+      }
+      query = query.filter("metadata", "cs", JSON.stringify({ [key]: value }));
+    }
   }
 
   return query;
 }
 
+async function getSupabaseClient() {
+  if (!supabaseClientPromise) {
+    supabaseClientPromise = import("../lib/supabase.js").then((module) => module.supabase);
+  }
+
+  return supabaseClientPromise;
+}
+
+async function verifyTransactionSignatureIfAvailable(txHash, merchantId = null) {
+  return paymentSignatureVerifier.verifyTransaction(txHash, { merchantId });
+}
+
+function escapeLikePattern(value) {
+  return String(value).replace(/[\\%_]/g, "\\$&");
+}
+
+function pushCondition(conditions, values, clause, value) {
+  values.push(value);
+  conditions.push(clause(values.length));
+}
+
+function buildPaymentListWhereClause(merchantId, filters = {}) {
+  const values = [merchantId];
+  const conditions = ["merchant_id = $1", "deleted_at IS NULL"];
+
+  if (typeof filters.client_id === "string" && filters.client_id.trim().length > 0) {
+    pushCondition(
+      conditions,
+      values,
+      (index) => `client_id = $${index}`,
+      filters.client_id.trim(),
+    );
+  }
+
+  if (typeof filters.status === "string" && filters.status.length > 0) {
+    pushCondition(conditions, values, (index) => `status = $${index}`, filters.status);
+  }
+
+  if (typeof filters.asset === "string" && filters.asset.length > 0) {
+    pushCondition(conditions, values, (index) => `asset = $${index}`, filters.asset);
+  }
+
+  if (typeof filters.date_from === "string" && filters.date_from.length > 0) {
+    pushCondition(
+      conditions,
+      values,
+      (index) => `created_at >= $${index}::timestamptz`,
+      `${filters.date_from}T00:00:00.000Z`,
+    );
+  }
+
+  if (typeof filters.date_to === "string" && filters.date_to.length > 0) {
+    pushCondition(
+      conditions,
+      values,
+      (index) => `created_at <= $${index}::timestamptz`,
+      `${filters.date_to}T23:59:59.999Z`,
+    );
+  }
+
+  if (typeof filters.created_after === "string" && filters.created_after.length > 0) {
+    pushCondition(
+      conditions,
+      values,
+      (index) => `created_at >= $${index}::timestamptz`,
+      filters.created_after,
+    );
+  }
+
+  if (typeof filters.created_before === "string" && filters.created_before.length > 0) {
+    pushCondition(
+      conditions,
+      values,
+      (index) => `created_at <= $${index}::timestamptz`,
+      filters.created_before,
+    );
+  }
+
+  if (typeof filters.search === "string" && filters.search.trim().length > 0) {
+    const term = filters.search.trim();
+    const escaped = `%${escapeLikePattern(term)}%`;
+    values.push(escaped);
+    const searchIndex = values.length;
+    const searchConditions = [
+      `id::text ILIKE $${searchIndex} ESCAPE '\\'`,
+      `COALESCE(description, '') ILIKE $${searchIndex} ESCAPE '\\'`,
+      `recipient ILIKE $${searchIndex} ESCAPE '\\'`,
+    ];
+
+    const numericTerm = Number(term);
+    if (!Number.isNaN(numericTerm)) {
+      values.push(numericTerm);
+      searchConditions.push(`amount = $${values.length}`);
+    }
+
+    conditions.push(`(${searchConditions.join(" OR ")})`);
+  }
+
+  if (filters.metadata && typeof filters.metadata === "object" && !Array.isArray(filters.metadata)) {
+    for (const [key, value] of Object.entries(filters.metadata)) {
+      if (!SAFE_METADATA_KEY_RE.test(key) || typeof value !== "string") {
+        continue;
+      }
+
+      values.push(JSON.stringify({ [key]: value }));
+      conditions.push(`metadata @> $${values.length}::jsonb`);
+    }
+  }
+
+  return {
+    whereClause: conditions.join(" AND "),
+    values,
+  };
+}
+
+function mapPaymentListRows(rows) {
+  return rows.map((row) => ({
+    id: row.id,
+    amount: Number(row.amount),
+    asset: row.asset,
+    asset_issuer: row.asset_issuer,
+    recipient: row.recipient,
+    description: row.description,
+    client_id: row.client_id,
+    status: row.status,
+    tx_id: row.tx_id,
+    created_at: row.created_at,
+  }));
+}
+
+async function getMerchantPaymentsViaPool(merchantId, filters, page, limit, offset) {
+  const { whereClause, values } = buildPaymentListWhereClause(merchantId, filters);
+  const paginationValues = [...values, limit, offset];
+  const limitIndex = values.length + 1;
+  const offsetIndex = values.length + 2;
+  const sql = `
+    SELECT
+      id,
+      amount,
+      asset,
+      asset_issuer,
+      recipient,
+      description,
+      client_id,
+      status,
+      tx_id,
+      created_at,
+      COUNT(*) OVER()::int AS total_count
+    FROM payments
+    WHERE ${whereClause}
+    ORDER BY created_at DESC
+    LIMIT $${limitIndex}
+    OFFSET $${offsetIndex}
+  `;
+
+  const { rows } = await queryWithRetry(sql, paginationValues, {
+    label: "merchant-payments-list",
+  });
+  const totalCount = rows.length > 0 ? Number(rows[0].total_count) : 0;
+  const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 0;
+
+  return {
+    payments: mapPaymentListRows(rows),
+    total_count: totalCount,
+    total_pages: totalPages,
+    page,
+    limit,
+  };
+}
+
+async function getMerchantPaymentsViaSupabase(merchantId, filters, page, limit, offset) {
+  const supabase = await getSupabaseClient();
+  let countQuery = supabase
+    .from("payments")
+    .select("*", { count: "exact", head: true })
+    .eq("merchant_id", merchantId)
+    .is("deleted_at", null);
+
+  countQuery = applyPaymentFilters(countQuery, filters);
+
+  const { count: totalCount, error: countError } = await countQuery;
+
+  if (countError) {
+    countError.status = 500;
+    throw countError;
+  }
+
+  let dataQuery = supabase
+    .from("payments")
+    .select("id, amount, asset, asset_issuer, recipient, description, client_id, status, tx_id, created_at")
+    .eq("merchant_id", merchantId)
+    .is("deleted_at", null);
+
+  dataQuery = applyPaymentFilters(dataQuery, filters);
+
+  const { data: payments, error: dataError } = await dataQuery
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (dataError) {
+    dataError.status = 500;
+    throw dataError;
+  }
+
+  const safeTotalCount = Number(totalCount || 0);
+  const totalPages = safeTotalCount > 0 ? Math.ceil(safeTotalCount / limit) : 0;
+
+  return {
+    payments: payments || [],
+    total_count: safeTotalCount,
+    total_pages: totalPages,
+    page,
+    limit,
+  };
+}
+
+async function getRollingMetricsViaPool(merchantId) {
+  const sql = `
+    WITH days AS (
+      SELECT generate_series(
+        (CURRENT_DATE - INTERVAL '6 days')::date,
+        CURRENT_DATE::date,
+        INTERVAL '1 day'
+      )::date AS day
+    ),
+    filtered AS (
+      SELECT
+        created_at,
+        amount,
+        status
+      FROM payments
+      WHERE merchant_id = $1
+        AND deleted_at IS NULL
+        AND created_at >= NOW() - INTERVAL '7 days'
+    ),
+    daily AS (
+      SELECT
+        date_trunc('day', created_at)::date AS day,
+        COALESCE(SUM(amount), 0)::float8 AS volume,
+        COUNT(*)::int AS count,
+        COUNT(*) FILTER (WHERE status = 'confirmed')::int AS confirmed_count
+      FROM filtered
+      GROUP BY 1
+    ),
+    totals AS (
+      SELECT
+        COALESCE(SUM(amount), 0)::float8 AS total_volume,
+        COUNT(*)::int AS total_payments,
+        COUNT(*) FILTER (WHERE status = 'confirmed')::int AS confirmed_count
+      FROM filtered
+    )
+    SELECT
+      TO_CHAR(days.day, 'YYYY-MM-DD') AS date,
+      COALESCE(daily.volume, 0)::float8 AS volume,
+      COALESCE(daily.count, 0)::int AS count,
+      COALESCE(daily.confirmed_count, 0)::int AS confirmed_count,
+      totals.total_volume::float8 AS total_volume,
+      totals.total_payments::int AS total_payments,
+      totals.confirmed_count::int AS total_confirmed_count
+    FROM days
+    LEFT JOIN daily ON daily.day = days.day
+    CROSS JOIN totals
+    ORDER BY days.day ASC
+  `;
+
+  const { rows } = await queryWithRetry(sql, [merchantId], {
+    label: "rolling-payment-metrics",
+  });
+  const totalsRow = rows[0] || {
+    total_volume: 0,
+    total_payments: 0,
+    total_confirmed_count: 0,
+  };
+  const totalPayments = Number(totalsRow.total_payments || 0);
+  const confirmedCount = Number(totalsRow.total_confirmed_count || 0);
+  const successRate =
+    totalPayments > 0 ? Number(((confirmedCount / totalPayments) * 100).toFixed(1)) : 0;
+
+  return {
+    data: rows.map((row) => ({
+      date: row.date,
+      volume: Number(Number(row.volume || 0).toFixed(2)),
+      count: Number(row.count || 0),
+      confirmed_count: Number(row.confirmed_count || 0),
+    })),
+    total_volume: Number(Number(totalsRow.total_volume || 0).toFixed(2)),
+    total_payments: totalPayments,
+    confirmed_count: confirmedCount,
+    success_rate: successRate,
+  };
+}
+
+async function getRollingMetricsViaSupabase(merchantId) {
+  const supabase = await getSupabaseClient();
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+  // No ORDER BY: the rows are bucketed by day into `metricsMap` and then read
+  // back through a fixed 7-day loop, so the result is independent of row order.
+  // Dropping the sort avoids an unnecessary ordering step on what can be a large
+  // 7-day window of a busy merchant's payments (issue #601).
+  const { data: payments, error } = await supabase
+    .from("payments")
+    .select("amount, created_at, status")
+    .eq("merchant_id", merchantId)
+    .is("deleted_at", null)
+    .gte("created_at", sevenDaysAgo.toISOString());
+
+  if (error) {
+    error.status = 500;
+    throw error;
+  }
+
+  const metricsMap = new Map();
+  let totalVolume = 0;
+
+  payments.forEach((payment) => {
+    const date = new Date(payment.created_at).toISOString().split("T")[0];
+    const volume = Number(payment.amount) || 0;
+
+    if (!metricsMap.has(date)) {
+      metricsMap.set(date, { date, volume: 0, count: 0, confirmed_count: 0 });
+    }
+
+    const dayMetric = metricsMap.get(date);
+    dayMetric.volume += volume;
+    dayMetric.count += 1;
+    if (payment.status === "confirmed") {
+      dayMetric.confirmed_count += 1;
+    }
+    totalVolume += volume;
+  });
+
+  const data = [];
+  for (let i = 6; i >= 0; i -= 1) {
+    const date = new Date();
+    date.setDate(date.getDate() - i);
+    const dateStr = date.toISOString().split("T")[0];
+
+    if (metricsMap.has(dateStr)) {
+      data.push(metricsMap.get(dateStr));
+    } else {
+      data.push({ date: dateStr, volume: 0, count: 0, confirmed_count: 0 });
+    }
+  }
+
+  const confirmedCount = payments.filter((payment) => payment.status === "confirmed").length;
+  const successRate =
+    payments.length > 0 ? Number(((confirmedCount / payments.length) * 100).toFixed(1)) : 0;
+
+  return {
+    data,
+    total_volume: Number(totalVolume.toFixed(2)),
+    total_payments: payments.length,
+    confirmed_count: confirmedCount,
+    success_rate: successRate,
+  };
+}
+
 export const paymentService = {
   async createPaymentSession(merchant, body) {
+    const supabase = await getSupabaseClient();
+    const asset = body.asset?.toUpperCase();
+    const assetIssuer = resolveAssetIssuer(asset, body.asset_issuer);
+
+    if (asset !== "XLM" && !assetIssuer) {
+      const error = new Error("asset_issuer is required for non-native assets");
+      error.status = 400;
+      throw error;
+    }
+
+    if (asset !== "XLM" && !isValidStellarPublicKey(assetIssuer)) {
+      const error = new Error("asset_issuer must be a valid Stellar public key");
+      error.status = 400;
+      throw error;
+    }
+
+    // Task #756: Dynamic Issuer Verification with Error Recovery
+    if (asset !== "XLM" && assetIssuer) {
+      try {
+        const issuerExists = await AssetIssuerErrorRecovery.verifyIssuerOnChain(assetIssuer);
+        if (!issuerExists) {
+          const error = new Error(`Asset issuer ${assetIssuer} does not exist on the Stellar network`);
+          error.status = 400;
+          throw error;
+        }
+      } catch (recoveryError) {
+        console.error("Asset issuer verification failed with recovery:", recoveryError);
+        // If it's a transient failure we might still want to proceed or fail-safe?
+        // Let's fail-safe for security if it's not a 404 but a real error
+        if (recoveryError.status !== 404) {
+          // Re-throw if it wasn't a "not found" but something else that recovery failed to handle
+          // after max retries/circuit breaker
+          throw recoveryError;
+        }
+      }
+    }
+
     // Per-asset payment limit validation
     const limits = merchant.payment_limits;
     if (limits && typeof limits === "object") {
@@ -86,8 +519,8 @@ export const paymentService = {
 
     // Allowed-issuers check
     const allowedIssuers = merchant.allowed_issuers;
-    if (Array.isArray(allowedIssuers) && allowedIssuers.length > 0) {
-      if (!body.asset_issuer || !allowedIssuers.includes(body.asset_issuer)) {
+    if (asset !== "XLM" && Array.isArray(allowedIssuers) && allowedIssuers.length > 0) {
+      if (!assetIssuer || !allowedIssuers.includes(assetIssuer)) {
         paymentFailedCounter.inc({ asset: body.asset, reason: "invalid_issuer" });
         const error = new Error("asset_issuer is not in the merchant's list of allowed issuers");
         error.status = 400;
@@ -100,6 +533,18 @@ export const paymentService = {
     const paymentLinkBase = process.env.PAYMENT_LINK_BASE || "http://localhost:3000";
     const paymentLink = `${paymentLinkBase}/pay/${paymentId}`;
 
+    logger.info(
+      {
+        paymentId,
+        merchantId: merchant.id,
+        asset,
+        amount: body.amount,
+        recipient: body.recipient,
+        hasAssetIssuer: !!resolvedAssetIssuer,
+      },
+      "Payment session created",
+    );
+
     const resolvedBranding = resolveBrandingConfig({
       merchantBranding: merchant.branding_config,
       brandingOverrides: body.branding_overrides,
@@ -109,19 +554,14 @@ export const paymentService = {
     metadata.branding_config = resolvedBranding;
 
     const network = (process.env.STELLAR_NETWORK || "testnet").toLowerCase();
-    const asset = body.asset?.toUpperCase();
-    let assetIssuer = body.asset_issuer;
-
-    if (!assetIssuer && ASSET_DEFAULTS[asset]) {
-      assetIssuer = ASSET_DEFAULTS[asset][network] || ASSET_DEFAULTS[asset]["testnet"];
-    }
+    const resolvedAssetIssuer = resolveAssetIssuer(asset, assetIssuer, network);
 
     const payload = {
       id: paymentId,
       merchant_id: merchant.id,
       amount: body.amount,
       asset: asset,
-      asset_issuer: assetIssuer || null,
+      asset_issuer: resolvedAssetIssuer || null,
       recipient: body.recipient,
       description: body.description || null,
       memo: body.memo || null,
@@ -152,6 +592,7 @@ export const paymentService = {
   },
 
   async getPaymentStatus(paymentId, merchantId = null) {
+    const supabase = await getSupabaseClient();
     // --- Redis read-through cache ---
     const redis = await connectRedisClient();
     const cached = await getCachedPayment(redis, paymentId);
@@ -202,6 +643,7 @@ export const paymentService = {
   },
 
   async verifyPayment(paymentId, merchantId = null, io = null) {
+    const supabase = await getSupabaseClient();
     let query = supabase
       .from("payments")
       .select(
@@ -246,10 +688,22 @@ export const paymentService = {
     });
 
     if (match) {
-      const isSignatureValid = await verifyTransactionSignature(
+      const signatureResult = await verifyTransactionSignatureIfAvailable(
         match.transaction_hash,
+        data.merchant_id,
       );
-      if (!isSignatureValid) {
+      if (!signatureResult.valid) {
+        logger.warn(
+          {
+            paymentId,
+            txHash: match.transaction_hash,
+            merchantId: data.merchant_id,
+            reason: signatureResult.reason,
+            isMultiSig: signatureResult.isMultiSig,
+            signatureCount: signatureResult.signatureCount,
+          },
+          "Payment verification: transaction signature verification failed",
+        );
         return { status: "pending" };
       }
     }
@@ -349,107 +803,23 @@ export const paymentService = {
 
     const offset = (page - 1) * limit;
 
-    let countQuery = supabase
-      .from("payments")
-      .select("*", { count: "exact", head: true })
-      .eq("merchant_id", merchantId);
-
-    countQuery = applyPaymentFilters(countQuery, queryParams);
-
-    const { count: totalCount, error: countError } = await countQuery;
-
-    if (countError) {
-      countError.status = 500;
-      throw countError;
+    try {
+      return await getMerchantPaymentsViaPool(merchantId, queryParams, page, limit, offset);
+    } catch {
+      return getMerchantPaymentsViaSupabase(merchantId, queryParams, page, limit, offset);
     }
-
-    let dataQuery = supabase
-      .from("payments")
-      .select("id, amount, asset, asset_issuer, recipient, description, status, tx_id, created_at")
-      .eq("merchant_id", merchantId);
-
-    dataQuery = applyPaymentFilters(dataQuery, queryParams);
-
-    const { data: payments, error: dataError } = await dataQuery
-      .order("created_at", { ascending: false })
-      .range(offset, offset + limit - 1);
-
-    if (dataError) {
-      dataError.status = 500;
-      throw dataError;
-    }
-
-    const totalPages = Math.ceil(totalCount / limit);
-
-    return {
-      payments: payments || [],
-      total_count: totalCount,
-      total_pages: totalPages,
-      page,
-      limit,
-    };
   },
 
   async getRollingMetrics(merchantId) {
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-    const { data: payments, error } = await supabase
-      .from("payments")
-      .select("amount, created_at, status")
-      .eq("merchant_id", merchantId)
-      .gte("created_at", sevenDaysAgo.toISOString())
-      .order("created_at", { ascending: true });
-
-    if (error) {
-      error.status = 500;
-      throw error;
+    try {
+      return await getRollingMetricsViaPool(merchantId);
+    } catch {
+      return getRollingMetricsViaSupabase(merchantId);
     }
-
-    const metricsMap = new Map();
-    let totalVolume = 0;
-
-    payments.forEach((payment) => {
-      const date = new Date(payment.created_at).toISOString().split("T")[0];
-      const volume = Number(payment.amount) || 0;
-
-      if (!metricsMap.has(date)) {
-        metricsMap.set(date, { date, volume: 0, count: 0 });
-      }
-
-      const dayMetric = metricsMap.get(date);
-      dayMetric.volume += volume;
-      dayMetric.count += 1;
-      totalVolume += volume;
-    });
-
-    const data = [];
-    for (let i = 6; i >= 0; i -= 1) {
-      const date = new Date();
-      date.setDate(date.getDate() - i);
-      const dateStr = date.toISOString().split("T")[0];
-
-      if (metricsMap.has(dateStr)) {
-        data.push(metricsMap.get(dateStr));
-      } else {
-        data.push({ date: dateStr, volume: 0, count: 0 });
-      }
-    }
-
-    const confirmedCount = payments.filter((p) => p.status === "confirmed").length;
-    const successRate =
-      payments.length > 0 ? Number(((confirmedCount / payments.length) * 100).toFixed(1)) : 0;
-
-    return {
-      data,
-      total_volume: Number(totalVolume.toFixed(2)),
-      total_payments: payments.length,
-      confirmed_count: confirmedCount,
-      success_rate: successRate,
-    };
   },
 
   async generateRefundTx(paymentId, merchantId) {
+    const supabase = await getSupabaseClient();
     const { data: payment, error } = await supabase
       .from("payments")
       .select("id, merchant_id, amount, asset, asset_issuer, recipient, status, tx_id, metadata")
@@ -524,6 +894,7 @@ export const paymentService = {
   },
 
   async confirmRefundTx(paymentId, merchantId, txHash) {
+    const supabase = await getSupabaseClient();
     const { data: payment, error } = await supabase
       .from("payments")
       .select("id, metadata")
@@ -558,6 +929,7 @@ export const paymentService = {
   },
 
   async getPathPaymentQuote(paymentId, sourceAsset, sourceAssetIssuer, sourceAccount, merchantId = null) {
+    const supabase = await getSupabaseClient();
     let query = supabase
       .from("payments")
       .select("id, amount, asset, asset_issuer, recipient, status");

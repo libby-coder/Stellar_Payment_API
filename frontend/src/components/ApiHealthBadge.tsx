@@ -8,52 +8,60 @@ export default function ApiHealthBadge() {
   const [status, setStatus] = useState<ExtendedHealthStatus>("loading");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    let mounted = true;
-    const checkHealth = async () => {
-      try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
-        const res = await fetch(`${apiUrl}/health`, { cache: "no-store" });
-        const data = await res.json().catch(() => ({}));
+  const checkHealth = async () => {
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+      const res = await fetch(`${apiUrl}/health`, { cache: "no-store" });
+      const data = await res.json().catch(() => ({}));
 
-        if (mounted) {
-          const services = data?.services ?? {};
-          const dbOk = services.database === "ok";
-          const horizonOk = services.horizon === "ok";
-          const apiReachable = true; // If we got an HTTP response, backend is reachable.
-          const healthy = apiReachable;
+      const services = data?.services ?? {};
+      const dbOk = services.database === "ok";
+      const horizonOk = services.horizon === "ok";
+      const apiReachable = true; // If we got an HTTP response, backend is reachable.
+      const healthy = apiReachable;
 
-          if (healthy) {
-            setStatus("healthy");
-            const missing: string[] = [];
-            if (!dbOk) missing.push("database");
-            if (!horizonOk) missing.push("horizon");
-            setErrorMsg(
-              missing.length > 0
-                ? `Degraded dependency: ${missing.join(" + ")} unavailable`
-                : null,
-            );
-          } else {
-            setStatus("error");
-            setErrorMsg(data?.error || "Backend unavailable");
-          }
-        }
-      } catch {
-        if (mounted) {
-          setStatus("error");
-          setErrorMsg("API Unreachable");
-        }
+      if (healthy) {
+        setStatus("healthy");
+        const missing: string[] = [];
+        if (!dbOk) missing.push("database");
+        if (!horizonOk) missing.push("horizon");
+        setErrorMsg(
+          missing.length > 0
+            ? `Degraded dependency: ${missing.join(" + ")} unavailable`
+            : null,
+        );
+      } else {
+        setStatus("error");
+        setErrorMsg(data?.error || "Backend unavailable");
       }
-    };
+    } catch {
+      setStatus("error");
+      setErrorMsg("API Unreachable");
+    }
+  };
 
+  useEffect(() => {
     checkHealth();
     // Re-check every 60 seconds
     const interval = setInterval(checkHealth, 60000);
     return () => {
-      mounted = false;
       clearInterval(interval);
     };
   }, []);
+
+  const handleRefresh = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (status === "loading") return;
+
+    // Optimistic Update: Immediately transition to visual checking/loading state
+    setStatus("loading");
+    setErrorMsg(null);
+
+    // satisfy with a micro-delay so the animation feels responsive and interactive
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await checkHealth();
+  };
 
   const config = {
     loading: {
@@ -77,9 +85,14 @@ export default function ApiHealthBadge() {
   }[status];
 
   return (
-    <div 
-      className="group relative flex items-center gap-2 rounded-full border border-[var(--border-subtle)] bg-white px-3.5 py-2 transition-all duration-300 hover:border-[var(--pluto-300)] hover:bg-[var(--pluto-50)]/50 cursor-default"
-      aria-describedby="api-status-tooltip"
+    <button
+      type="button"
+      onClick={handleRefresh}
+      disabled={status === "loading"}
+      aria-live="polite"
+      aria-describedby="api-health-tooltip"
+      aria-label={`API Health Status: ${status === "healthy" ? "Active" : status === "error" ? "Down" : "Checking"} ${errorMsg ? `- ${errorMsg}` : ""}. Click to re-check.`}
+      className="group relative flex items-center gap-2 rounded-full border border-[var(--border-subtle)] bg-white px-3.5 py-2 transition-all duration-300 hover:border-[var(--pluto-300)] hover:bg-[var(--pluto-50)]/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[var(--pluto-300)] active:scale-[0.97] disabled:opacity-85 disabled:cursor-not-allowed cursor-pointer"
     >
       <div className="relative flex h-2 w-2 items-center justify-center">
         {status !== "loading" && (
@@ -94,10 +107,10 @@ export default function ApiHealthBadge() {
       </span>
 
       {/* Tooltip */}
-      <div 
-        id="api-status-tooltip"
+      <div
+        id="api-health-tooltip"
         role="tooltip"
-        className="pointer-events-none absolute left-1/2 top-full z-50 mt-4 -translate-x-1/2 whitespace-nowrap rounded-2xl border border-[var(--pluto-100)] bg-white/95 px-5 py-3.5 text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--text-primary)] opacity-0 shadow-[0_20px_50px_rgba(0,0,0,0.12)] backdrop-blur-md transition-all duration-300 group-hover:opacity-100 group-hover:translate-y-1.5"
+        className="pointer-events-none absolute left-1/2 top-full z-50 mt-4 -translate-x-1/2 whitespace-nowrap rounded-2xl border border-[var(--pluto-100)] bg-white/95 px-5 py-3.5 text-[10px] font-bold uppercase tracking-[0.2em] text-[var(--text-primary)] opacity-0 shadow-[0_20px_50px_rgba(0,0,0,0.12)] backdrop-blur-md transition-all duration-300 group-hover:opacity-100 group-hover:translate-y-1.5 group-focus-visible:opacity-100 group-focus-visible:translate-y-1.5"
       >
         <p className="text-center leading-none">{config.label}</p>
         {(errorMsg && status !== "loading") && (
@@ -106,6 +119,7 @@ export default function ApiHealthBadge() {
         {/* Arrow */}
         <div className="absolute bottom-full left-1/2 h-2.5 w-2.5 -translate-x-1/2 translate-y-1.5 rotate-45 border-l border-t border-[var(--pluto-100)] bg-white/95" />
       </div>
-    </div>
+    </button>
   );
 }
+

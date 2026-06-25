@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import PaymentMetrics from "./PaymentMetrics";
 import { vi } from "vitest";
@@ -35,6 +35,14 @@ vi.mock("recharts", () => ({
     Tooltip: () => React.createElement("div"),
     Legend: () => React.createElement("div"),
 }));
+
+function createDeferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => {
+        resolve = res;
+    });
+    return { promise, resolve };
+}
 
 describe("PaymentMetrics Component", () => {
     beforeEach(() => {
@@ -120,6 +128,93 @@ describe("PaymentMetrics Component", () => {
 
         await waitFor(() => {
             expect(screen.getByText("noPayments")).toBeInTheDocument();
+        });
+    });
+
+    it("refetches volume data when range changes", async () => {
+        (globalThis.fetch as any)
+            .mockResolvedValueOnce({ ok: true, json: async () => ({ total_volume: 10, confirmed_count: 1, success_rate: 100, data: [] }) })
+            .mockResolvedValueOnce({ ok: true, json: async () => ({ assets: [], data: [] }) })
+            .mockResolvedValueOnce({ ok: true, json: async () => ({ total_volume: 10, confirmed_count: 1, success_rate: 100, data: [] }) })
+            .mockResolvedValueOnce({ ok: true, json: async () => ({ assets: [], data: [] }) });
+
+        render(React.createElement(PaymentMetrics));
+
+        await waitFor(() => {
+            expect(globalThis.fetch).toHaveBeenCalledWith(
+                expect.stringContaining("/api/metrics/volume?range=7D"),
+                expect.any(Object),
+            );
+        });
+
+        fireEvent.click(screen.getByRole("button", { name: "30D" }));
+
+        await waitFor(() => {
+            expect(globalThis.fetch).toHaveBeenCalledWith(
+                expect.stringContaining("/api/metrics/volume?range=30D"),
+                expect.any(Object),
+            );
+        });
+    });
+
+    it("retries loading when retry button is clicked", async () => {
+        (globalThis.fetch as any)
+            .mockResolvedValueOnce({ ok: false, json: async () => ({}) })
+            .mockResolvedValueOnce({ ok: true, json: async () => ({ assets: [], data: [] }) })
+            .mockResolvedValueOnce({ ok: true, json: async () => ({ total_volume: 123, confirmed_count: 2, success_rate: 50, data: [] }) })
+            .mockResolvedValueOnce({ ok: true, json: async () => ({ assets: [], data: [] }) });
+
+        render(React.createElement(PaymentMetrics));
+
+        await waitFor(() => {
+            expect(screen.getByRole("button", { name: "retry" })).toBeInTheDocument();
+        });
+
+        fireEvent.click(screen.getByRole("button", { name: "retry" }));
+
+        await waitFor(() => {
+            expect(screen.getByText("123")).toBeInTheDocument();
+        });
+    });
+
+    it("keeps previous chart visible while refreshing selected range", async () => {
+        const deferredSummary = createDeferred<any>();
+        const deferredVolume = createDeferred<any>();
+
+        (globalThis.fetch as any)
+            .mockResolvedValueOnce({ ok: true, json: async () => ({ total_volume: 1500, confirmed_count: 42, success_rate: 98.5, data: [] }) })
+            .mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({
+                    assets: ["XLM"],
+                    data: [{ date: "2026-04-20", count: 1, XLM: 10 }],
+                }),
+            })
+            .mockResolvedValueOnce({ ok: true, json: async () => deferredSummary.promise })
+            .mockResolvedValueOnce({ ok: true, json: async () => deferredVolume.promise });
+
+        render(React.createElement(PaymentMetrics));
+
+        await waitFor(() => {
+            expect(screen.getByText("1,500")).toBeInTheDocument();
+        });
+
+        fireEvent.click(screen.getByRole("button", { name: "30D" }));
+
+        await waitFor(() => {
+            expect(screen.getByText("Updating...")).toBeInTheDocument();
+        });
+        expect(screen.getByText("1,500")).toBeInTheDocument();
+        expect(document.querySelector(".animate-pulse")).not.toBeInTheDocument();
+
+        deferredSummary.resolve({ total_volume: 1600, confirmed_count: 44, success_rate: 99, data: [] });
+        deferredVolume.resolve({
+            assets: ["XLM"],
+            data: [{ date: "2026-04-21", count: 1, XLM: 12 }],
+        });
+
+        await waitFor(() => {
+            expect(screen.getByText("1,600")).toBeInTheDocument();
         });
     });
 });
