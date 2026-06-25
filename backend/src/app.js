@@ -11,7 +11,7 @@ import { createSwaggerSpec } from "./swagger.js";
 
 import createPaymentsRouter from "./routes/payments.js";
 import createMerchantsRouter from "./routes/merchants.js";
-import metricsRouter from "./routes/metrics.js";
+import createMetricsRouter from "./routes/metrics.js";
 import webhooksRouter from "./routes/webhooks.js";
 import prometheusRouter from "./routes/prometheus.js";
 import sep0001Router from "./routes/sep0001.js";
@@ -35,6 +35,7 @@ import {
   createMerchantRegistrationRateLimit,
   createSep10ChallengeRateLimit,
   createSep10VerifyRateLimit,
+  createDashboardMetricsRateLimit,
 } from "./lib/rate-limit.js";
 import { versionDeprecationMiddleware } from "./lib/version-deprecation.js";
 
@@ -262,6 +263,14 @@ export async function createApp({ redisClient }) {
     sep10ChallengeRateLimit: createSep10ChallengeRateLimit({ store: sep10RateLimitStore }),
     sep10VerifyRateLimit: createSep10VerifyRateLimit({ store: sep10RateLimitStore }),
   });
+
+  const dashboardMetricsRateLimit = createDashboardMetricsRateLimit({
+    store: redisAvailable
+      ? createRedisRateLimitStore({ client: redisClient, prefix: "rl:dashboard:" })
+      : undefined,
+  });
+
+  const metricsRouter = createMetricsRouter({ dashboardMetricsRateLimit });
 
   // x402 pay-per-request on payment creation endpoints (custom middleware flow)
   const x402Provider = process.env.X402_PROVIDER_PUBLIC_KEY;
