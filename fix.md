@@ -1,20 +1,28 @@
-[Backend] Enhance error recovery for Audit Logger
-
+[Frontend] Implement framer-motion animations for Multi-sig Approval Modal
+Repo Avatar
+emdevelopa/Stellar_Payment_API
 Description
-This task involves system optimization for the Audit Logger module.
-The goal is to Enhance error recovery for.lower Audit Logger to enhance the platform's robustness and user experience.
+This task involves UX enhancement for the Multi-sig Approval Modal module.
+The goal is to implement framer-motion animations for Multi-sig Approval Modal to improve the platform's styling, user interactions, and overall accessibility.
 
 Requirements and context
 
-Adhere to the Drips Wave design and engineering standards.
-Ensure full test coverage for new logic.
-Must be secure, performant, and well-documented.
-Specifically focused on system optimization.
+Must be secure, tested, and documented
+Adhere to the Drips Wave design and UI/UX standards
+Ensure compatibility across desktop and mobile browsers
+Specifically focused on frontend UX enhancement and responsiveness
 Suggested execution
 
 Fork the repo and create a branch
-Review existing implementation in Audit Logger.
-Apply changes: Enhance error recovery for.
+git checkout -b feature/fe-implement-framer-motion-animations-for-multi-sig-approval-modal
+Implement changes
+
+Review existing component in Multi-sig Approval Modal
+Apply changes: Implement framer-motion animations for Multi-sig Approval Modal
+Use clean CSS or tailwind variables for styling
+Maintain state transitions and visual feedback
 Test and commit
-Example commit message
-backend: Enhance error recovery for Audit Logger
+
+Test mobile responsiveness and interactive states
+Check accessibility (a11y) using standard audits
+Include screenshots or gifs in the PR
